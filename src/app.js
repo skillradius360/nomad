@@ -31,7 +31,7 @@ const healthCheck = asyncHandler(async (req, res) => {
 })
 
 app.use(express.json());
-app.get("/",verifyJWT,healthCheck)
+app.get("/health",healthCheck)
 
 const corsOptions = {
   origin: true,
