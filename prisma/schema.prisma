@@ -1,0 +1,182 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Get a free hosted Postgres database in seconds: `npx create-db`
+
+generator client {
+  provider = "prisma-client-js"
+  // output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id    String  @id @default(uuid())
+  email String? @unique
+  name  String?
+  phone String? @unique
+
+  googleUid String?   @unique
+  loginType LoginType @default(GOOGLE)
+  role      UserRole?
+  otp       Int?
+
+  latitude  Float?
+  longitude Float?
+  address   String?
+
+  shops     Shop[]
+  orders    Order[]
+  recharges Recharges[]
+
+  profileImg String?
+
+  billingPlan Plans   @default(TRIAL)
+  isVerified  Boolean @default(false)
+  isBlocked   Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+}
+
+model Shop {
+  id             String     @id @default(uuid())
+  shopName       String
+  ownerId        String
+  shopImage      String?
+  Address        String?
+  Tags           String?
+  Description    String?
+  OpeningTime    DateTime?
+  ClosingTime    DateTime?
+  ShopOpenStatus ShopStatus @default(OPEN)
+  Holidays       String[]   @default(["sunday"])
+  Verified       Boolean    @default(false)
+  shopBalance    Int        @default(100)
+  shopCategory   ShopTypes
+
+  MinimumDeliveryRate Int? @default(50)
+  FreeDeliveryRate    Int? @default(70)
+
+  owner     User        @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  orders    Order[]
+  recharges Recharges[]
+
+  latitude  Float?
+  longitude Float?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+}
+
+model Order {
+  id     Int     @id @default(autoincrement())
+  userId String
+  shopId String?
+
+  user User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  shop Shop? @relation(fields: [shopId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+}
+
+model OTP {
+  id Int @id @default(autoincrement())
+
+  phone String?
+  code  String?
+
+  verified  Boolean  @default(false)
+  expiresAt DateTime @default(now())
+
+  createdAt DateTime @default(now())
+}
+
+model Recharges {
+  id          String         @id @default(uuid())
+  userId      String
+  shopId      String
+  orderAmount Int
+  status      RechargeStatus @default(PENDING)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  shop Shop @relation(fields: [shopId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+}
+
+
+model Cuisine {
+  id         String       @id @default(uuid())
+  sortOrderId Int 
+  name       String
+  slug       String       @unique
+  active     Boolean      @default(true)
+
+  categories Categories[]
+}
+
+model Categories {
+  id          String      @id @default(uuid())
+  sortOrderId Int?
+  name        String
+  slug        String      @unique
+  allItems    Items[]
+
+  cuisineId   String ?
+  cuisine     Cuisine?     @relation(fields: [cuisineId], references: [id], onDelete: Cascade)
+  active      Boolean     @default(true)
+
+}
+
+
+model Items {
+  id          String       @id @default(uuid())
+  name        String 
+  // photoUrl    String?
+  pricing     String   
+  sortOrderId  Int?
+  categoryId  String ?
+  category    Categories?   @relation(fields: [categoryId], references: [id])
+  active      Boolean      @default(true)
+}
+
+
+enum UserRole {
+  SUPER
+  BUYER
+  SELLER
+  ADMIN
+}
+
+enum LoginType {
+  GOOGLE
+  OTP
+  CODE
+}
+
+enum Plans {
+  TRIAL
+  ACTIVE
+}
+
+enum ShopStatus {
+  OPEN
+  CLOSED
+  AUTOMATIC
+}
+
+enum RechargeStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum ShopTypes {
+  FASTFOOD
+  VEGETABLES
+}
