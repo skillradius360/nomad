@@ -4,8 +4,7 @@ import { OAuth2Client } from "google-auth-library";
 import { encodeAccessToken } from "../../utils/jwtPacker.js";
 
 
-import { PrismaPg } from "@prisma/adapter-pg";
-import { PrismaClient } from "@prisma/client";
+import { prisma } from "../../db/index.js";
 import { apiError, apiResponse,asyncHandler } from "../../utils/handler.js";
 
 import { twilioSMSHelper } from "../../utils/twilioHelper.js";
@@ -14,10 +13,6 @@ import { v4 as uuidv4 } from "uuid";
 dotenv.config();
 
 const OTP_EXPIRY_MS = 5 * 60 * 1000;
-
-const connectionString = `${process.env.DATABASE_URL}`;
-const adapter = new PrismaPg({ connectionString });
-export const prisma = new PrismaClient({ adapter });
 
 // Google OAuth Client
 const client = new OAuth2Client(
@@ -242,7 +237,7 @@ const invalidateExpiredOtp = asyncHandler(async (req, res) => {
       }
     }
   });
-
+  if(!invalidateExpiredOtp) throw new apiError(400,"otp expiry failure")
   return res
     .status(200)
     .json(new apiResponse(200, {

@@ -9,6 +9,7 @@ import { sellerRouter } from "./routes/seller.routes.js";
 import { cuisineRouter } from "./routes/cuisine.routes.js";
 import { categoryRouter } from "./routes/categories.routes.js";
 import { itemRouter } from "./routes/items.routes.js";
+import { comboRouter } from "./routes/combos.routes.js";
 import { asyncHandler } from "./utils/asyncHandler.js";
 import { verifyJWT } from "./middleware/auth.middleware.js";
 
@@ -48,8 +49,10 @@ app.use("/sellers", sellerRouter);
 app.use("/cuisines", cuisineRouter);
 app.use("/categories", categoryRouter);
 app.use("/items", itemRouter);
+app.use("/combos", comboRouter);
 
 app.listen(8000,()=>{
     console.log("this is the express server listening")
 } 
 )
+// http://13.206.206.50:8000/health

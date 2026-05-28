@@ -1,10 +1,5 @@
-import { PrismaPg } from "@prisma/adapter-pg";
-import { PrismaClient } from "@prisma/client";
+import { prisma } from "../db/index.js";
 import { apiError, asyncHandler } from "../utils/handler.js";
-
-const connectionString = `${process.env.DATABASE_URL}`;
-const adapter = new PrismaPg({ connectionString });
-const prisma = new PrismaClient({ adapter });
 
 const getCurrentUser = async (userId) => {
     if (!userId) {

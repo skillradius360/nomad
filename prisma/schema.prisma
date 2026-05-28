@@ -63,6 +63,7 @@ model Shop {
   owner     User        @relation(fields: [ownerId], references: [id], onDelete: Cascade)
   orders    Order[]
   recharges Recharges[]
+  combos    Combo[]
 
   latitude  Float?
   longitude Float?
@@ -72,16 +73,34 @@ model Shop {
 }
 
 model Order {
-  id     Int     @id @default(autoincrement())
-  userId String
-  shopId String?
+  id                 String       @id @default(uuid())
+  userId             String
+  shopId             String?
+  currentOrderStatus OrderStatus?
 
   user User  @relation(fields: [userId], references: [id], onDelete: Cascade)
   shop Shop? @relation(fields: [shopId], references: [id], onDelete: SetNull)
+  // orderItems OrderItem[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
 }
+
+// ///////////////////////////////*****************************\\\\\\\\\\\\\\\\\\\\\\\\\\\
+// model OrderItem {
+//   id      String @id @default(uuid())
+//   orderId String
+//   itemId  String
+//   quantity Int ? @default(0)
+//   priceAtOrderTime Int? @default(0)
+//   order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+//   item  Items @relation(fields: [itemId], references: [id], onDelete: Restrict)
+
+//   createdAt DateTime @default(now())
+//   updatedAt DateTime @default(now()) @updatedAt
+
+//   @@unique([orderId, itemId])
+// }
 
 model OTP {
   id Int @id @default(autoincrement())
@@ -109,42 +128,96 @@ model Recharges {
   updatedAt DateTime @default(now()) @updatedAt
 }
 
-
 model Cuisine {
-  id         String       @id @default(uuid())
-  sortOrderId Int 
-  name       String
-  slug       String       @unique
-  active     Boolean      @default(true)
+  id          String  @id @default(uuid())
+  sortOrderId Int
+  name        String
+  slug        String  @unique
+  active      Boolean @default(true)
 
   categories Categories[]
+  combos     Combo[]
 }
 
 model Categories {
-  id          String      @id @default(uuid())
+  id          String  @id @default(uuid())
   sortOrderId Int?
   name        String
-  slug        String      @unique
+  slug        String  @unique
   allItems    Items[]
 
-  cuisineId   String ?
-  cuisine     Cuisine?     @relation(fields: [cuisineId], references: [id], onDelete: Cascade)
-  active      Boolean     @default(true)
+  cuisineId String?
+  cuisine   Cuisine? @relation(fields: [cuisineId], references: [id], onDelete: Cascade)
+  active    Boolean  @default(true)
 
+  combos Combo[]
 }
-
 
 model Items {
-  id          String       @id @default(uuid())
-  name        String 
+  id   String @id @default(uuid())
+  name String
   // photoUrl    String?
-  pricing     String   
-  sortOrderId  Int?
-  categoryId  String ?
-  category    Categories?   @relation(fields: [categoryId], references: [id])
-  active      Boolean      @default(true)
+
+  // not implemented
+  pricing            String
+  discount           Int?   @default(0)
+  discountPercentage Float? @default(0.0)
+  availableQuantity  Int?   @default(0)
+
+  sortOrderId Int?
+  categoryId  String?
+  category    Categories? @relation(fields: [categoryId], references: [id])
+  // orderItems  OrderItem[]
+  comboItems  ComboItem[]
+  active      Boolean     @default(true)
 }
 
+model Combo {
+  id          String  @id @default(uuid())
+  shopId      String
+  name        String
+  comboKey    String?
+  description String?
+  imageUrl    String?
+
+  totalPrice         Int
+  discount           Int   @default(0)
+  finalPrice         Int?
+  percentageDiscount Float @default(0.0)
+
+  cuisineId  String?
+  categoryId String?
+
+  active            Boolean @default(true)
+  availableQuantity Int?    @default(0)
+  sortOrderId       Int?
+
+  shop     Shop        @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  cuisine  Cuisine?    @relation(fields: [cuisineId], references: [id], onDelete: SetNull)
+  category Categories? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+
+  items ComboItem[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@unique([shopId, comboKey])
+}
+
+model ComboItem {
+  id       String @id @default(uuid())
+  comboId  String
+  itemId   String
+  quantity Int    @default(1)
+
+  combo Combo @relation(fields: [comboId], references: [id], onDelete: Cascade)
+  item  Items @relation(fields: [itemId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@unique([comboId, itemId])
+}
 
 enum UserRole {
   SUPER
@@ -179,4 +252,13 @@ enum RechargeStatus {
 enum ShopTypes {
   FASTFOOD
   VEGETABLES
+}
+
+enum OrderStatus {
+  NEW
+  PREPARING
+  READY
+  PAYMENT_DONE
+  DONE
+  ORDER_READY
 }
