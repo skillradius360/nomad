@@ -1,86 +1,86 @@
 import { prisma } from "../../db/index.js";
 import { apiError, apiResponse, asyncHandler } from "../../utils/handler.js";
 
-// admin
-const createItems = asyncHandler(async(req,res)=>{
-    const {name,pricing,sortOrderId,sortOrder} = req.body;
+const masterItemInclude = {
+    category:{
+        select:{
+            id:true,
+            name:true,
+            slug:true,
+            cuisine:{
+                select:{
+                    id:true,
+                    name:true,
+                    slug:true
+                }
+            }
+        }
+    }
+};
 
-    if(!name) throw new apiError(400,"item name is required");
-    if(pricing === undefined || pricing === null || pricing === "") throw new apiError(400,"pricing is required");
+const shopItemInclude = {
+    shop:{
+        select:{
+            id:true,
+            shopName:true,
+            ownerId:true
+        }
+    },
+    item:{
+        include:masterItemInclude
+    }
+};
 
-    const itemData = await prisma.items.create({
-        data:{
-            name:name,
-            pricing:String(pricing),
-            sortOrderId:Number(sortOrderId ?? sortOrder ?? 0)
+const resolveCuisine = async({cuisineId,cuisineName})=>{
+    if(!cuisineId && !cuisineName) return null;
+
+    const cuisine = await prisma.cuisine.findFirst({
+        where:cuisineId ? {
+            id:cuisineId
+        } : {
+            OR:[
+                {name:{equals:cuisineName,mode:"insensitive"}},
+                {slug:String(cuisineName).toUpperCase()}
+            ]
         }
     });
 
-    if(!itemData) throw new apiError(400,"creation of items error!");
-    return res.status(201).json(new apiResponse(201,itemData,"item created successfully"));
-});
+    if(!cuisine) throw new apiError(404,"cuisine not found");
+    return cuisine;
+};
 
-// admin 
-const mapItems = asyncHandler(async(req,res)=>{
-    const {categoryName,cuisineName,menuItems} = req.body;
+const resolveCategory = async({categoryId,categoryName,cuisineName,cuisineId,required = false})=>{
+    if(!categoryId && !categoryName){
+        if(required) throw new apiError(400,"category is required");
+        return null;
+    }
 
-    if(!categoryName) throw new apiError(400,"category name is required");
-    if(!Array.isArray(menuItems) || menuItems.length === 0) throw new apiError(400,"Not a array passed with menu items");
-
-    const requestedItems = menuItems.map((item)=>{
-        if(typeof item === "string"){
-            return {
-                name:item
-            };
-        }
-
-        return {
-            id:item.id || item.itemId,
-            name:item.name || item.itemName,
-            sortOrderId:item.sortOrderId
-        };
-    });
-
-    const itemWhere = requestedItems
-        .map((item)=>{
-            const conditions = [];
-
-            if(item.id !== undefined && item.id !== null){
-                conditions.push({id:String(item.id)});
-            }
-
-            if(item.name){
-                conditions.push({name:{equals:item.name,mode:"insensitive"}});
-            }
-
-            return conditions.length ? {OR:conditions} : null;
-        })
-        .filter(Boolean);
-
-    if(itemWhere.length !== requestedItems.length) throw new apiError(400,"item id or name is required");
-
-    const categoryWhere = {
+    const where = categoryId ? {
+        id:categoryId
+    } : {
         OR:[
             {name:{equals:categoryName,mode:"insensitive"}},
-            {slug:categoryName.toUpperCase()}
+            {slug:String(categoryName).toUpperCase()}
         ]
     };
 
+    if(cuisineId){
+        where.cuisineId = cuisineId;
+    }
+
     if(cuisineName){
-        categoryWhere.cuisine = {
+        where.cuisine = {
             is:{
                 OR:[
                     {name:{equals:cuisineName,mode:"insensitive"}},
-                    {slug:cuisineName.toUpperCase()}
+                    {slug:String(cuisineName).toUpperCase()}
                 ]
             }
         };
     }
 
-    const categoryData = await prisma.categories.findFirst({
-        where:{
-            ...categoryWhere
-        },
+    const category = await prisma.categories.findFirst({
+        where,
         include:{
             cuisine:{
                 select:{
@@ -92,21 +92,91 @@ const mapItems = asyncHandler(async(req,res)=>{
         }
     });
 
-    if(!categoryData) throw new apiError(404,cuisineName ? "category not found for selected cuisine" : "category not found");
+    if(!category) throw new apiError(404,cuisineName || cuisineId ? "category not found for selected cuisine" : "category not found");
+    return category;
+};
+
+// admin: create a master catalog item
+const createItems = asyncHandler(async(req,res)=>{
+    const {
+        name,
+        itemName,
+        description,
+        imageUrl,
+        photoUrl,
+        sortOrderId,
+        sortOrder,
+        categoryId,
+        categoryName,
+        cuisineName,
+        cuisineId
+    } = req.body;
+    const itemTitle = itemName || name;
+
+    if(!itemTitle) throw new apiError(400,"item name is required");
+
+    const category = await resolveCategory({categoryId,categoryName,cuisineName,cuisineId});
+
+    const existingItem = await prisma.items.findFirst({
+        where:{
+            name:{
+                equals:itemTitle,
+                mode:"insensitive"
+            },
+            categoryId:category?.id || null
+        }
+    });
+
+    if(existingItem) throw new apiError(409,"item already exists in master list");
+
+    const itemData = await prisma.items.create({
+        data:{
+            name:itemTitle,
+            description,
+            imageUrl:imageUrl || photoUrl,
+            sortOrderId:Number(sortOrderId ?? sortOrder ?? 0),
+            categoryId:category?.id
+        },
+        include:masterItemInclude
+    });
+
+    return res.status(201).json(new apiResponse(201,itemData,"master item created successfully"));
+});
+
+// admin: map master items to a category
+const mapItems = asyncHandler(async(req,res)=>{
+    const {categoryName,cuisineName,menuItems} = req.body;
+
+    if(!categoryName) throw new apiError(400,"category name is required");
+    if(!Array.isArray(menuItems) || menuItems.length === 0) throw new apiError(400,"Not a array passed with menu items");
+
+    const requestedItems = menuItems.map((item)=>{
+        if(typeof item === "string") return {name:item};
+        return {
+            id:item.id || item.itemId,
+            name:item.name || item.itemName,
+            sortOrderId:item.sortOrderId
+        };
+    });
+
+    const itemWhere = requestedItems
+        .map((item)=>{
+            const conditions = [];
+            if(item.id !== undefined && item.id !== null) conditions.push({id:String(item.id)});
+            if(item.name) conditions.push({name:{equals:item.name,mode:"insensitive"}});
+            return conditions.length ? {OR:conditions} : null;
+        })
+        .filter(Boolean);
+
+    if(itemWhere.length !== requestedItems.length) throw new apiError(400,"item id or name is required");
+
+    const categoryData = await resolveCategory({categoryName,cuisineName,required:true});
 
     const itemsData = await prisma.items.findMany({
         where:{
             OR:itemWhere
         },
-        include:{
-            category:{
-                select:{
-                    id:true,
-                    name:true,
-                    slug:true
-                }
-            }
-        }
+        include:masterItemInclude
     });
 
     const missingItems = requestedItems.filter((requestedItem)=>{
@@ -121,17 +191,9 @@ const mapItems = asyncHandler(async(req,res)=>{
         throw new apiError(404,`items not found: ${missingNames.join(", ")}`);
     }
 
-    const alreadyAssignedItems = itemsData.filter((item)=>item.categoryId);
-
+    const alreadyAssignedItems = itemsData.filter((item)=>item.categoryId && item.categoryId !== categoryData.id);
     if(alreadyAssignedItems.length > 0){
-        const assignedNames = alreadyAssignedItems.map((item)=>{
-            if(item.categoryId === categoryData.id){
-                return `${item.name} is already assigned to ${categoryData.name}`;
-            }
-
-            return `${item.name} is already assigned to ${item.category?.name || "another category"}`;
-        });
-
+        const assignedNames = alreadyAssignedItems.map((item)=>`${item.name} is already assigned to ${item.category?.name || "another category"}`);
         throw new apiError(409,assignedNames.join(", "));
     }
 
@@ -150,17 +212,15 @@ const mapItems = asyncHandler(async(req,res)=>{
             allItems:{
                 orderBy:{
                     sortOrderId:"asc"
-                }
+                },
+                include:masterItemInclude
             }
         }
     });
 
-    if(!updatedCategoryData) throw new apiError(400,"category update failed");
-
     return res.status(200).json(new apiResponse(200,updatedCategoryData,"mapping of category and item updated successfully"));
 });
 
-// user and admin
 const fetchItemsToCategory = asyncHandler(async(req,res)=>{
     const categoryName = req.params.categoryName || req.query.categoryName || req.body.categoryName;
 
@@ -177,7 +237,8 @@ const fetchItemsToCategory = asyncHandler(async(req,res)=>{
             allItems:{
                 orderBy:{
                     sortOrderId:"asc"
-                }
+                },
+                include:masterItemInclude
             }
         }
     });
@@ -192,18 +253,10 @@ const fetchAllItems = asyncHandler(async(req,res)=>{
         orderBy:{
             sortOrderId:"asc"
         },
-        include:{
-            category:{
-                select:{
-                    id:true,
-                    name:true,
-                    slug:true
-                }
-            }
-        }
+        include:masterItemInclude
     });
 
-    return res.status(200).json(new apiResponse(200,items,"items fetched successfully"));
+    return res.status(200).json(new apiResponse(200,items,"master items fetched successfully"));
 });
 
 const fetchOnlyItems = asyncHandler(async(req,res)=>{
@@ -213,39 +266,249 @@ const fetchOnlyItems = asyncHandler(async(req,res)=>{
         }
     });
 
-    return res.status(200).json(new apiResponse(200,items,"items fetched successfully"));
+    return res.status(200).json(new apiResponse(200,items,"master items fetched successfully"));
 });
 
-// admin
+const fetchItemsByShop = asyncHandler(async(req,res)=>{
+    const shopId = req.params.shopId || req.query.shopId;
+    const {categoryId,categoryName,cuisineId,cuisineName} = req.query;
+
+    if(!shopId) throw new apiError(400,"shop id is required");
+
+    const currentUser = await prisma.user.findUnique({
+        where:{
+            id:req.userData?.id
+        },
+        select:{
+            id:true,
+            role:true,
+            isBlocked:true
+        }
+    });
+
+    if(!currentUser || currentUser.isBlocked) throw new apiError(401,"User blocked or unauthorized");
+
+    const shop = await prisma.shop.findUnique({
+        where:{
+            id:shopId
+        },
+        select:{
+            id:true,
+            shopName:true,
+            ownerId:true
+        }
+    });
+
+    if(!shop) throw new apiError(404,"shop not found");
+    if(currentUser.role !== "ADMIN" && shop.ownerId !== currentUser.id){
+        throw new apiError(403,"You can only fetch items for your own shop");
+    }
+
+    const cuisine = await resolveCuisine({cuisineId,cuisineName});
+    const category = await resolveCategory({categoryId,categoryName,cuisineId,cuisineName});
+
+    const items = await prisma.shopItem.findMany({
+        where:{
+            shopId,
+            active:true,
+            ...(category?.id ? {
+                item:{
+                    categoryId:category.id
+                }
+            } : {}),
+            ...(cuisine?.id && !category?.id ? {
+                item:{
+                    category:{
+                        is:{
+                            cuisineId:cuisine.id
+                        }
+                    }
+                }
+            } : {})
+        },
+        orderBy:{
+            sortOrderId:"asc"
+        },
+        include:shopItemInclude
+    });
+
+    return res.status(200).json(new apiResponse(200,{
+        shop,
+        selected:{
+            cuisine,
+            category
+        },
+        items
+    },"shop items fetched successfully"));
+});
+
+const editShopItem = asyncHandler(async(req,res)=>{
+    const {shopItemId} = req.params;
+    const {
+        pricing,
+        discount,
+        discountPercentage,
+        availableQuantity,
+        description,
+        imageUrl,
+        photoUrl,
+        sortOrderId,
+        sortOrder,
+        active
+    } = req.body;
+
+    if(!shopItemId) throw new apiError(400,"shop item id is required");
+
+    const currentUser = await prisma.user.findUnique({
+        where:{
+            id:req.userData?.id
+        },
+        select:{
+            id:true,
+            role:true,
+            isBlocked:true
+        }
+    });
+
+    if(!currentUser || currentUser.isBlocked) throw new apiError(401,"User blocked or unauthorized");
+
+    const existingShopItem = await prisma.shopItem.findUnique({
+        where:{
+            id:shopItemId
+        },
+        include:{
+            shop:{
+                select:{
+                    id:true,
+                    ownerId:true
+                }
+            }
+        }
+    });
+
+    if(!existingShopItem) throw new apiError(404,"shop item not found");
+    if(currentUser.role !== "ADMIN" && existingShopItem.shop.ownerId !== currentUser.id){
+        throw new apiError(403,"You can only edit items for your own shop");
+    }
+
+    const dataToUpdate = {};
+
+    if(pricing !== undefined) dataToUpdate.pricing = String(pricing);
+    if(discount !== undefined) dataToUpdate.discount = discount === null ? null : Number(discount);
+    if(discountPercentage !== undefined) dataToUpdate.discountPercentage = discountPercentage === null ? null : Number(discountPercentage);
+    if(availableQuantity !== undefined) dataToUpdate.availableQuantity = availableQuantity === null ? null : Number(availableQuantity);
+    if(description !== undefined) dataToUpdate.description = description;
+    if(imageUrl !== undefined || photoUrl !== undefined) dataToUpdate.imageUrl = imageUrl || photoUrl;
+    if(sortOrderId !== undefined || sortOrder !== undefined) dataToUpdate.sortOrderId = sortOrderId === null || sortOrder === null ? null : Number(sortOrderId ?? sortOrder);
+    if(active !== undefined) dataToUpdate.active = active;
+
+    if(Object.keys(dataToUpdate).length === 0) throw new apiError(400,"no shop item data passed");
+
+    const updatedShopItem = await prisma.shopItem.update({
+        where:{
+            id:shopItemId
+        },
+        data:dataToUpdate,
+        include:shopItemInclude
+    });
+
+    return res.status(200).json(new apiResponse(200,updatedShopItem,"shop item updated successfully"));
+});
+
+const deleteShopItem = asyncHandler(async(req,res)=>{
+    const {shopItemId} = req.params;
+
+    if(!shopItemId) throw new apiError(400,"shop item id is required");
+
+    const currentUser = await prisma.user.findUnique({
+        where:{
+            id:req.userData?.id
+        },
+        select:{
+            id:true,
+            role:true,
+            isBlocked:true
+        }
+    });
+
+    if(!currentUser || currentUser.isBlocked) throw new apiError(401,"User blocked or unauthorized");
+
+    const existingShopItem = await prisma.shopItem.findUnique({
+        where:{
+            id:shopItemId
+        },
+        include:{
+            shop:{
+                select:{
+                    id:true,
+                    ownerId:true
+                }
+            }
+        }
+    });
+
+    if(!existingShopItem) throw new apiError(404,"shop item not found");
+    if(currentUser.role !== "ADMIN" && existingShopItem.shop.ownerId !== currentUser.id){
+        throw new apiError(403,"You can only delete items from your own shop");
+    }
+
+    const deletedShopItem = await prisma.shopItem.delete({
+        where:{
+            id:shopItemId
+        }
+    });
+
+    return res.status(200).json(new apiResponse(200,deletedShopItem,"shop item deleted successfully"));
+});
+
+// admin: edit a master catalog item
 const editItem = asyncHandler(async(req,res)=>{
     const {itemId} = req.params;
-    const {itemName,name,sortOrderId,sortOrder} = req.body;
+    const {
+        itemName,
+        name,
+        description,
+        imageUrl,
+        photoUrl,
+        sortOrderId,
+        sortOrder,
+        categoryId,
+        categoryName,
+        cuisineName,
+        cuisineId,
+        active
+    } = req.body;
 
     if(!itemId) throw new apiError(400,"item id is required");
-    if(!itemName && !name && sortOrderId === undefined && sortOrder === undefined) throw new apiError(400,"no item data passed");
 
     const dataToUpdate = {};
     const updatedName = itemName || name;
 
-    if(updatedName){
-        dataToUpdate.name = updatedName;
+    if(updatedName) dataToUpdate.name = updatedName;
+    if(description !== undefined) dataToUpdate.description = description;
+    if(imageUrl !== undefined || photoUrl !== undefined) dataToUpdate.imageUrl = imageUrl || photoUrl;
+    if(sortOrderId !== undefined || sortOrder !== undefined) dataToUpdate.sortOrderId = Number(sortOrderId ?? sortOrder);
+    if(active !== undefined) dataToUpdate.active = active;
+
+    if(categoryId !== undefined || categoryName !== undefined){
+        const category = await resolveCategory({categoryId,categoryName,cuisineName,cuisineId,required:true});
+        dataToUpdate.categoryId = category.id;
     }
 
-    if(sortOrderId !== undefined || sortOrder !== undefined){
-        dataToUpdate.sortOrderId = Number(sortOrderId ?? sortOrder);
-    }
+    if(Object.keys(dataToUpdate).length === 0) throw new apiError(400,"no item data passed");
 
     const updatedItem = await prisma.items.update({
         where:{
             id:itemId
         },
-        data:dataToUpdate
+        data:dataToUpdate,
+        include:masterItemInclude
     });
 
-    return res.status(200).json(new apiResponse(200,updatedItem,"item updated successfully"));
+    return res.status(200).json(new apiResponse(200,updatedItem,"master item updated successfully"));
 });
 
-// admin
+// admin: delete a master catalog item
 const deleteItem = asyncHandler(async(req,res)=>{
     const {itemId} = req.params;
 
@@ -257,93 +520,121 @@ const deleteItem = asyncHandler(async(req,res)=>{
         }
     });
 
-    return res.status(200).json(new apiResponse(200,deletedItem,"item deleted successfully"));
+    return res.status(200).json(new apiResponse(200,deletedItem,"master item deleted successfully"));
 });
 
-
+// seller: create/reuse a master item and add it to the seller's shop
 const addPersonalProduct = asyncHandler(async(req,res)=>{
     const sellerId = req.userData?.id;
-    const {cuisineName,categoryName,itemName,name,pricing,sortOrderId,sortOrder} = req.body;
+    const {
+        shopId,
+        itemId,
+        globalItemId,
+        cuisineName,
+        cuisineId,
+        categoryName,
+        categoryId,
+        itemName,
+        name,
+        pricing,
+        discount,
+        discountPercentage,
+        availableQuantity,
+        description,
+        imageUrl,
+        photoUrl,
+        sortOrderId,
+        sortOrder,
+        active
+    } = req.body;
     const customItemName = itemName || name;
+    const masterItemId = globalItemId || itemId;
 
     if(!sellerId) throw new apiError(401,"Unauthorized user");
-    if(!cuisineName) throw new apiError(400,"cuisine name is required");
-    if(!categoryName) throw new apiError(400,"category name is required");
-    if(!customItemName) throw new apiError(400,"item name is required");
+    if(!shopId) throw new apiError(400,"shop id is required");
+    if(!masterItemId && !customItemName) throw new apiError(400,"item id or item name is required");
     if(pricing === undefined || pricing === null || pricing === "") throw new apiError(400,"pricing is required");
 
-    const categoryData = await prisma.categories.findFirst({
+    const shop = await prisma.shop.findUnique({
         where:{
-            OR:[
-                {name:{equals:categoryName,mode:"insensitive"}},
-                {slug:categoryName.toUpperCase()}
-            ],
-            cuisine:{
-                is:{
-                    OR:[
-                        {name:{equals:cuisineName,mode:"insensitive"}},
-                        {slug:cuisineName.toUpperCase()}
-                    ]
-                }
-            }
+            id:shopId
         },
-        include:{
-            cuisine:{
-                select:{
-                    id:true,
-                    name:true,
-                    slug:true
-                }
-            }
+        select:{
+            id:true,
+            ownerId:true,
+            shopName:true
         }
     });
 
-    if(!categoryData) throw new apiError(404,"category not found for selected cuisine");
+    if(!shop) throw new apiError(404,"shop not found");
+    if(shop.ownerId !== sellerId) throw new apiError(403,"You can only create products for your own shop");
 
-    const existingItem = await prisma.items.findFirst({
+    const category = await resolveCategory({categoryId,categoryName,cuisineName,cuisineId,required:!masterItemId});
+
+    let masterItem = null;
+    if(masterItemId){
+        masterItem = await prisma.items.findUnique({
+            where:{
+                id:masterItemId
+            },
+            include:masterItemInclude
+        });
+
+        if(!masterItem) throw new apiError(404,"master item not found");
+    }else{
+        masterItem = await prisma.items.findFirst({
+            where:{
+                name:{
+                    equals:customItemName,
+                    mode:"insensitive"
+                },
+                categoryId:category.id
+            },
+            include:masterItemInclude
+        });
+
+        if(!masterItem){
+            masterItem = await prisma.items.create({
+                data:{
+                    name:customItemName,
+                    description,
+                    imageUrl:imageUrl || photoUrl,
+                    sortOrderId:Number(sortOrderId ?? sortOrder ?? 0),
+                    categoryId:category.id
+                },
+                include:masterItemInclude
+            });
+        }
+    }
+
+    const existingShopItem = await prisma.shopItem.findUnique({
         where:{
-            categoryId:categoryData.id,
-            name:{
-                equals:customItemName,
-                mode:"insensitive"
+            shopId_itemId:{
+                shopId,
+                itemId:masterItem.id
             }
         }
     });
 
-    if(existingItem) throw new apiError(409,`${customItemName} is already created and assigned to ${categoryData.name}`);
+    if(existingShopItem) throw new apiError(409,`${masterItem.name} is already added to this shop`);
 
-    const customItem = await prisma.items.create({
+    const shopItem = await prisma.shopItem.create({
         data:{
-            name:customItemName,
+            shopId,
+            itemId:masterItem.id,
             pricing:String(pricing),
+            discount:discount === undefined || discount === null ? 0 : Number(discount),
+            discountPercentage:discountPercentage === undefined || discountPercentage === null ? 0 : Number(discountPercentage),
+            availableQuantity:availableQuantity === undefined || availableQuantity === null ? 0 : Number(availableQuantity),
+            description,
+            imageUrl:imageUrl || photoUrl,
             sortOrderId:Number(sortOrderId ?? sortOrder ?? 0),
-            category:{
-                connect:{
-                    id:categoryData.id
-                }
-            }
+            active:active ?? true
         },
-        include:{
-            category:{
-                select:{
-                    id:true,
-                    name:true,
-                    slug:true,
-                    cuisine:{
-                        select:{
-                            id:true,
-                            name:true,
-                            slug:true
-                        }
-                    }
-                }
-            }
-        }
+        include:shopItemInclude
     });
 
-    return res.status(201).json(new apiResponse(201,customItem,"custom item created and assigned successfully"));
+    return res.status(201).json(new apiResponse(201,shopItem,"item added to shop successfully"));
 });
 
-
-
-export { createItems, mapItems, fetchItemsToCategory, fetchAllItems, fetchOnlyItems, editItem, deleteItem, addPersonalProduct };
+export { createItems, mapItems, fetchItemsToCategory, fetchAllItems, fetchOnlyItems, fetchItemsByShop, editShopItem, deleteShopItem, editItem, deleteItem, addPersonalProduct };

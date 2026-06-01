@@ -1,0 +1,20 @@
+BUYER checkout
+    POST /orders/checkout
+        creates order with status NEW
+        decrements item/combo inventory
+
+SELLER sees active orders
+    GET /orders/seller
+        returns NEW, PREPARING, READY orders
+
+SELLER confirms order
+    PATCH /orders/:orderId/confirm
+        NEW -> PREPARING
+
+SELLER marks ready
+    PATCH /orders/:orderId/ready
+        PREPARING -> READY
+
+SELLER completes order
+    PATCH /orders/:orderId/complete
+        READY -> DONE

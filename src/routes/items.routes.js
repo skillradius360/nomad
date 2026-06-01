@@ -6,6 +6,7 @@ import {
     fetchAllItems,
     fetchItemsToCategory,
     fetchOnlyItems,
+    fetchItemsByShop,
     mapItems,
     addPersonalProduct,
 } from "../controllers/items/items.controller.js";
@@ -22,6 +23,7 @@ itemRouter.route("/map").post(isAdmin, mapItems);
 itemRouter.route("/custom").post(isSeller, addPersonalProduct);
 itemRouter.route("/fetchallitems").get(fetchAllItems);
 itemRouter.route("/only").get(fetchOnlyItems);
+itemRouter.route("/shop/:shopId").get(fetchItemsByShop);
 itemRouter.route("/category").get(fetchItemsToCategory);
 itemRouter.route("/category/:categoryName").get(fetchItemsToCategory);
 itemRouter.route("/:itemId").patch(isAdmin, editItem).delete(isAdmin, deleteItem);

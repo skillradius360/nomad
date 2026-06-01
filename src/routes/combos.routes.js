@@ -5,7 +5,7 @@ import {
     deleteCombo,
     editCombo,
     getCombosByShop,
-} from "../combos/combos.controller.js";
+} from "../controllers/combos/combos.controller.js";
 import { verifyJWT } from "../middleware/auth.middleware.js";
 
 export const comboRouter = Router();

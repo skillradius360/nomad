@@ -1,5 +1,5 @@
-import { prisma } from "../db/index.js";
-import { apiError, apiResponse, asyncHandler } from "../utils/handler.js";
+import { prisma } from "../../db/index.js";
+import { apiError, apiResponse, asyncHandler } from "../../utils/handler.js";
 
 const comboInclude = {
     shop:{
@@ -27,16 +27,27 @@ const comboInclude = {
         include:{
             item:{
                 include:{
-                    category:{
+                    shop:{
                         select:{
                             id:true,
-                            name:true,
-                            slug:true,
-                            cuisine:{
+                            shopName:true,
+                            ownerId:true
+                        }
+                    },
+                    item:{
+                        include:{
+                            category:{
                                 select:{
                                     id:true,
                                     name:true,
-                                    slug:true
+                                    slug:true,
+                                    cuisine:{
+                                        select:{
+                                            id:true,
+                                            name:true,
+                                            slug:true
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -172,25 +183,18 @@ const createCombo = asyncHandler(async(req,res)=>{
         throw new apiError(400,"duplicate combo items are not allowed");
     }
 
-    const comboItemsData = await prisma.items.findMany({
+    const comboItemsData = await prisma.shopItem.findMany({
         where:{
             id:{
                 in:uniqueItemIds
             },
             active:true,
-            ...(category?.id ? {categoryId:category.id} : {}),
-            ...(cuisine?.id ? {
-                category:{
-                    is:{
-                        cuisineId:cuisine.id
-                    }
-                }
-            } : {})
+            shopId
         }
     });
 
     if(comboItemsData.length !== uniqueItemIds.length){
-        throw new apiError(404,"one or more selected items were not found for selected cuisine/category");
+        throw new apiError(404,"one or more selected items were not found for this shop");
     }
 
     const comboItems = normalizedItems.map((selectedItem)=>{
@@ -451,25 +455,18 @@ const editCombo = asyncHandler(async(req,res)=>{
         const activeCategoryId = dataToUpdate.categoryId === null ? undefined : dataToUpdate.categoryId || existingCombo.categoryId;
         const activeCuisineId = dataToUpdate.cuisineId === null ? undefined : dataToUpdate.cuisineId || existingCombo.cuisineId;
 
-        const comboItemsData = await prisma.items.findMany({
+        const comboItemsData = await prisma.shopItem.findMany({
             where:{
                 id:{
                     in:uniqueItemIds
                 },
                 active:true,
-                ...(activeCategoryId ? {categoryId:activeCategoryId} : {}),
-                ...(activeCuisineId ? {
-                    category:{
-                        is:{
-                            cuisineId:activeCuisineId
-                        }
-                    }
-                } : {})
+                shopId:targetShopId
             }
         });
 
         if(comboItemsData.length !== uniqueItemIds.length){
-            throw new apiError(404,"one or more selected items were not found for selected cuisine/category");
+            throw new apiError(404,"one or more selected items were not found for this shop");
         }
 
         const comboItems = normalizedItems.map((selectedItem)=>{
@@ -606,6 +603,23 @@ const editCombo = asyncHandler(async(req,res)=>{
 
             const activeComboName = dataToUpdate.name || existingCombo.name;
             const activeShopId = dataToUpdate.shopId || existingCombo.shopId;
+            if(dataToUpdate.shopId !== undefined){
+                const existingItemIds = existingComboItems.map((comboItem)=>comboItem.itemId);
+                const shopItemCount = await prisma.shopItem.count({
+                    where:{
+                        id:{
+                            in:existingItemIds
+                        },
+                        active:true,
+                        shopId:activeShopId
+                    }
+                });
+
+                if(shopItemCount !== existingItemIds.length){
+                    throw new apiError(404,"one or more existing combo items were not found for this shop");
+                }
+            }
+
             const activeCuisineId = dataToUpdate.cuisineId === null ? undefined : dataToUpdate.cuisineId || existingCombo.cuisineId;
             const activeCategoryId = dataToUpdate.categoryId === null ? undefined : dataToUpdate.categoryId || existingCombo.categoryId;
             const comboItemKey = existingComboItems
@@ -782,11 +796,43 @@ const getCombosByShop = asyncHandler(async(req,res)=>{
 
 const comboBuilder = asyncHandler(async(req,res)=>{
     const {
+        shopId,
         cuisineId,
         cuisineName,
         categoryId,
         categoryName
     } = req.query;
+
+    if(!shopId) throw new apiError(400,"shop id is required");
+
+    const currentUser = await prisma.user.findUnique({
+        where:{
+            id:req.userData?.id
+        },
+        select:{
+            id:true,
+            role:true,
+            isBlocked:true
+        }
+    });
+
+    if(!currentUser || currentUser.isBlocked) throw new apiError(401,"User blocked or unauthorized");
+
+    const shop = await prisma.shop.findUnique({
+        where:{
+            id:shopId
+        },
+        select:{
+            id:true,
+            shopName:true,
+            ownerId:true
+        }
+    });
+
+    if(!shop) throw new apiError(404,"shop not found");
+    if(currentUser.role !== "ADMIN" && shop.ownerId !== currentUser.id){
+        throw new apiError(403,"You can only build combos for your own shop");
+    }
 
     let cuisine = null;
     if(cuisineId || cuisineName){
@@ -838,14 +884,21 @@ const comboBuilder = asyncHandler(async(req,res)=>{
         }
     });
 
-    const items = await prisma.items.findMany({
+    const items = await prisma.shopItem.findMany({
         where:{
             active:true,
-            ...(category?.id ? {categoryId:category.id} : {}),
-            ...(cuisine?.id ? {
-                category:{
-                    is:{
-                        cuisineId:cuisine.id
+            shopId,
+            ...(category?.id ? {
+                item:{
+                    categoryId:category.id
+                }
+            } : {}),
+            ...(cuisine?.id && !category?.id ? {
+                item:{
+                    category:{
+                        is:{
+                            cuisineId:cuisine.id
+                        }
                     }
                 }
             } : {})
@@ -854,16 +907,20 @@ const comboBuilder = asyncHandler(async(req,res)=>{
             sortOrderId:"asc"
         },
         include:{
-            category:{
-                select:{
-                    id:true,
-                    name:true,
-                    slug:true,
-                    cuisine:{
+            item:{
+                include:{
+                    category:{
                         select:{
                             id:true,
                             name:true,
-                            slug:true
+                            slug:true,
+                            cuisine:{
+                                select:{
+                                    id:true,
+                                    name:true,
+                                    slug:true
+                                }
+                            }
                         }
                     }
                 }
@@ -873,6 +930,7 @@ const comboBuilder = asyncHandler(async(req,res)=>{
 
     return res.status(200).json(new apiResponse(200,{
         selected:{
+            shop,
             cuisine,
             category
         },
