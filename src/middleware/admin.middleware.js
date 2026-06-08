@@ -37,9 +37,23 @@ const hasRole = (role, message) => {
     });
 };
 
+const hasAnyRole = (roles, message) => {
+    return asyncHandler(async (req, res, next) => {
+        const user = await getCurrentUser(req.userData?.id);
+
+        if (!roles.includes(user.role)) {
+            throw new apiError(403, message);
+        }
+
+        req.currentUser = user;
+        next();
+    });
+};
+
 const isAdmin = hasRole("ADMIN", "Admin access required");
 const isSeller = hasRole("SELLER", "Seller access required");
 const isBuyer = hasRole("BUYER", "Buyer access required");
+const isAdminOrSeller = hasAnyRole(["ADMIN", "SELLER"], "Admin or seller access required");
 
 
 // ***************************************************************************
@@ -66,4 +80,4 @@ const isSelfOrAdmin = asyncHandler(async (req, res, next) => {
     throw new apiError(403, "You can only manage your own account");
 });
 
-export { isAdmin, isBuyer, isSeller, isSelfOrAdmin };
+export { isAdmin, isAdminOrSeller, isBuyer, isSeller, isSelfOrAdmin };

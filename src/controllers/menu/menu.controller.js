@@ -649,6 +649,79 @@ const deleteMenu = asyncHandler(async(req,res)=>{
     return res.status(200).json(new apiResponse(200,deletedMenu,"menu deleted successfully"));
 });
 
+const reorderMenus = asyncHandler(async(req,res)=>{
+    const {shopId,menuIds} = req.body;
+
+    if(!shopId) throw new apiError(400,"shop id is required");
+    if(!Array.isArray(menuIds) || menuIds.length === 0){
+        throw new apiError(400,"menuIds must be a non-empty array");
+    }
+
+    const uniqueMenuIds = [...new Set(menuIds.map((menuId)=>String(menuId)).filter(Boolean))];
+    if(uniqueMenuIds.length !== menuIds.length){
+        throw new apiError(400,"duplicate menu ids are not allowed");
+    }
+
+    const currentUser = await prisma.user.findUnique({
+        where:{
+            id:req.userData?.id
+        },
+        select:{
+            id:true,
+            role:true,
+            isBlocked:true
+        }
+    });
+
+    if(!currentUser || currentUser.isBlocked) throw new apiError(401,"User blocked or unauthorized");
+
+    const shop = await prisma.shop.findUnique({
+        where:{
+            id:shopId
+        },
+        select:{
+            id:true,
+            ownerId:true
+        }
+    });
+
+    if(!shop) throw new apiError(404,"shop not found");
+    if(currentUser.role !== "ADMIN" && shop.ownerId !== currentUser.id){
+        throw new apiError(403,"You can only manage menus for your own shop");
+    }
+
+    const menus = await prisma.menu.findMany({
+        where:{
+            id:{
+                in:uniqueMenuIds
+            },
+            shopId
+        },
+        select:{
+            id:true
+        }
+    });
+
+    if(menus.length !== uniqueMenuIds.length){
+        throw new apiError(400,"one or more menu ids are invalid");
+    }
+
+    const updatedMenus = await prisma.$transaction(
+        uniqueMenuIds.map((menuId,index)=>{
+            return prisma.menu.update({
+                where:{
+                    id:menuId
+                },
+                data:{
+                    sortOrderId:index + 1
+                }
+            });
+        })
+    );
+
+    return res.status(200).json(new apiResponse(200,updatedMenus,"menus reordered successfully"));
+});
+
 const fetchRunningMenusByShop = asyncHandler(async(req,res)=>{
     const shopId = req.params.shopId || req.query.shopId;
 
@@ -760,4 +833,4 @@ const fetchRunningMenusByShop = asyncHandler(async(req,res)=>{
     },"running menus fetched successfully"));
 });
 
-export { createMenu, editMenu, deleteMenu, fetchRunningMenusByShop };
+export { createMenu, editMenu, deleteMenu, reorderMenus, fetchRunningMenusByShop };

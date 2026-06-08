@@ -27,11 +27,13 @@ model User {
   longitude Float?
   address   String?
 
-  shops     Shop[]
-  orders    Order[]
-  recharges Recharges[]
+  shops           Shop[]
+  orders          Order[]
+  recharges       Recharges[]
+  completedOffers BuyerCompletedOffer[]
 
   profileImg String?
+  buyerAdTargets BuyerAdTarget[]
 
   billingPlan Plans   @default(TRIAL)
   isVerified  Boolean @default(false)
@@ -42,7 +44,7 @@ model User {
 }
 
 model Shop {
-  id             String     @id @default(uuid())
+  id             String            @id @default(uuid())
   shopName       String
   ownerId        String
   shopImage      String?
@@ -51,27 +53,57 @@ model Shop {
   Description    String?
   OpeningTime    DateTime?
   ClosingTime    DateTime?
-  ShopOpenStatus ShopStatus @default(OPEN)
-  Holidays       String[]   @default(["sunday"])
-  Verified       Boolean    @default(false)
-  shopBalance    Int        @default(100)
+  ShopOpenStatus ShopStatus        @default(OPEN)
+  status         ShopStatus        @default(AUTOMATIC)
+  Holidays       String[]          @default(["sunday"])
+  Verified       Boolean           @default(false)
+  shopBalance    Int               @default(100)
   shopCategory   ShopTypes
+  billingStatus  ShopBillingStatus @default(TRIAL)
+  trialStartedAt DateTime          @default(now())
+  trialDays      Int?
+  trialEndsAt    DateTime?
+  slug           String            @unique
 
   MinimumDeliveryRate Int? @default(50)
   FreeDeliveryRate    Int? @default(70)
 
-  owner     User        @relation(fields: [ownerId], references: [id], onDelete: Cascade)
-  orders    Order[]
-  recharges Recharges[]
-  combos    Combo[]
-  items     ShopItem[]
-  menus     Menu[]
+  owner           User                  @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  orders          Order[]
+  recharges       Recharges[]
+  combos          Combo[]
+  items           ShopItem[]
+  menus           Menu[]
+  timings         ShopTiming[]
+  completedOffers BuyerCompletedOffer[]
+  targetedAds     AdSellerTarget[]
 
   latitude  Float?
   longitude Float?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
+}
+
+model ShopTiming {
+  id        String    @id @default(uuid())
+  shopId    String
+  dayOfWeek DayOfWeek
+
+  /// Minutes after midnight in the shop's local timezone.
+  /// Example: 9:30 AM = 570, 5:00 PM = 1020.
+  startMinute Int
+  endMinute   Int
+
+  active Boolean @default(true)
+
+  shop Shop @relation(fields: [shopId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@unique([shopId, dayOfWeek])
+  @@index([shopId, dayOfWeek, active])
 }
 
 model Order {
@@ -86,15 +118,35 @@ model Order {
   totalAmount        Int           @default(0)
   customerNote       String?
 
-  user       User        @relation(fields: [userId], references: [id], onDelete: Cascade)
-  shop       Shop?       @relation(fields: [shopId], references: [id], onDelete: SetNull)
-  orderItems OrderItem[]
+  user           User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  shop           Shop?                @relation(fields: [shopId], references: [id], onDelete: SetNull)
+  orderItems     OrderItem[]
+  completedOffer BuyerCompletedOffer?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
 
   @@index([shopId, currentOrderStatus])
   @@index([userId, createdAt])
+}
+
+model BuyerCompletedOffer {
+  id          String   @id @default(uuid())
+  buyerId     String
+  shopId      String
+  orderId     String   @unique
+  totalAmount Int      @default(0)
+  completedAt DateTime @default(now())
+
+  buyer User  @relation(fields: [buyerId], references: [id], onDelete: Cascade)
+  shop  Shop  @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@index([buyerId, completedAt])
+  @@index([shopId, completedAt])
 }
 
 model OrderItem {
@@ -146,6 +198,82 @@ model Recharges {
   updatedAt DateTime @default(now()) @updatedAt
 }
 
+model Ad {
+  id                      String       @id @default(uuid())
+  name                    String
+  description             String?
+  imageUrl                String?
+  sellerDashboardImageUrl String?
+  sellerHomeImageUrl      String?
+  buyerExploreImageUrl    String?
+  buyerShopPageImageUrl   String?
+  linkUrl                 String?
+  placement               AdPlacement?
+  targetMode              AdTargetMode @default(ALL_SELLERS)
+  startsAt                DateTime     @default(now())
+  endsAt                  DateTime
+  active                  Boolean      @default(true)
+
+  sellerTargets AdSellerTarget[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@index([placement, active, startsAt, endsAt])
+}
+
+model AdSellerTarget {
+  id     String @id @default(uuid())
+  adId   String
+  shopId String
+
+  ad   Ad   @relation(fields: [adId], references: [id], onDelete: Cascade)
+  shop Shop @relation(fields: [shopId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@unique([adId, shopId])
+  @@index([shopId])
+}
+
+model BuyerAds {
+  id          String   @id @default(uuid())
+  name        String
+  description String?
+  imageUrl    String
+  linkUrl     String?
+  active      Boolean  @default(true)
+  target      AdTarget @default(GLOBAL)
+  startsAt    DateTime @default(now())
+  endsAt      DateTime
+
+  buyerTargets BuyerAdTarget[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@index([active, target, startsAt, endsAt])
+}
+
+model BuyerAdTarget {
+  id        String @id @default(uuid())
+  buyerAdId String
+  buyerId   String
+
+  buyerAd BuyerAds @relation(fields: [buyerAdId], references: [id], onDelete: Cascade)
+  buyer   User     @relation(fields: [buyerId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@unique([buyerAdId, buyerId])
+  @@index([buyerId])
+}
+
+enum AdTarget {
+  GLOBAL
+  INDIVIDUAL
+}
+
 model Cuisine {
   id          String  @id @default(uuid())
   sortOrderId Int
@@ -182,6 +310,7 @@ model Items {
   category    Categories? @relation(fields: [categoryId], references: [id])
 
   shopItems ShopItem[]
+  tags      ItemTag[]
   active    Boolean    @default(true)
 
   createdAt DateTime @default(now())
@@ -198,10 +327,10 @@ model ShopItem {
   discountPercentage Float? @default(0.0)
   availableQuantity  Int?   @default(0)
 
-  imageUrl     String?
-  description  String?
-  sortOrderId  Int?
-  active       Boolean @default(true)
+  imageUrl    String?
+  description String?
+  sortOrderId Int?
+  active      Boolean @default(true)
 
   shop Shop  @relation(fields: [shopId], references: [id], onDelete: Cascade)
   item Items @relation(fields: [itemId], references: [id], onDelete: Cascade)
@@ -243,11 +372,53 @@ model Combo {
   items      ComboItem[]
   menuCombos MenuCombo[]
   orderItems OrderItem[]
+  tags       ComboTag[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
 
   @@unique([shopId, comboKey])
+}
+
+model Tag {
+  id     String  @id @default(uuid())
+  name   String
+  slug   String  @unique
+  active Boolean @default(true)
+
+  itemTags  ItemTag[]
+  comboTags ComboTag[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+}
+
+model ItemTag {
+  id     String @id @default(uuid())
+  itemId String
+  tagId  String
+
+  item Items @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  tag  Tag   @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@unique([itemId, tagId])
+  @@index([tagId])
+}
+
+model ComboTag {
+  id      String @id @default(uuid())
+  comboId String
+  tagId   String
+
+  combo Combo @relation(fields: [comboId], references: [id], onDelete: Cascade)
+  tag   Tag   @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@unique([comboId, tagId])
+  @@index([tagId])
 }
 
 model ComboItem {
@@ -356,6 +527,12 @@ enum Plans {
   ACTIVE
 }
 
+enum ShopBillingStatus {
+  TRIAL
+  ACTIVE
+  PAYMENT_DUE
+}
+
 enum ShopStatus {
   OPEN
   CLOSED
@@ -371,6 +548,18 @@ enum RechargeStatus {
 enum ShopTypes {
   FASTFOOD
   VEGETABLES
+}
+
+enum AdPlacement {
+  SELLER_DASHBOARD
+  SELLER_HOME
+  BUYER_EXPLORE
+  BUYER_SHOP_PAGE
+}
+
+enum AdTargetMode {
+  ALL_SELLERS
+  TARGETED_SELLERS
 }
 
 enum OrderStatus {

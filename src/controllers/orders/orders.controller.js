@@ -3,6 +3,108 @@ import { asyncHandler, apiError, apiResponse } from "../../utils/handler.js";
 
 const VALID_PAYMENT_METHODS = ["CASH","CARD","UPI"];
 
+const orderInventoryInclude = {
+    shop:{
+        select:{
+            id:true,
+            shopName:true,
+            ownerId:true
+        }
+    },
+    orderItems:{
+        include:{
+            shopItem:{
+                include:{
+                    item:true
+                }
+            },
+            combo:{
+                include:{
+                    items:{
+                        include:{
+                            item:{
+                                include:{
+                                    item:true
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+};
+
+const orderResponseInclude = {
+    user:{
+        select:{
+            id:true,
+            name:true,
+            phone:true
+        }
+    },
+    shop:{
+        select:{
+            id:true,
+            shopName:true,
+            ownerId:true
+        }
+    },
+    orderItems:true
+};
+
+const addInventoryUsage = (usageMap, inventoryItem, quantity, name)=>{
+    if(!inventoryItem?.id) return;
+
+    const existingUsage = usageMap.get(inventoryItem.id);
+    if(existingUsage){
+        existingUsage.quantity += quantity;
+        return;
+    }
+
+    usageMap.set(inventoryItem.id,{
+        id:inventoryItem.id,
+        name,
+        quantity,
+        availableQuantity:inventoryItem.availableQuantity
+    });
+};
+
+const getOrderInventoryUsage = (order)=>{
+    const shopItemUsage = new Map();
+    const comboUsage = new Map();
+
+    order.orderItems.forEach((orderItem)=>{
+        if(orderItem.orderItemType === "ITEM"){
+            addInventoryUsage(
+                shopItemUsage,
+                orderItem.shopItem,
+                orderItem.quantity,
+                orderItem.shopItem?.item?.name || orderItem.name || "item"
+            );
+            return;
+        }
+
+        if(orderItem.orderItemType === "COMBO"){
+            addInventoryUsage(comboUsage,orderItem.combo,orderItem.quantity,orderItem.combo?.name || orderItem.name || "combo");
+
+            orderItem.combo?.items?.forEach((comboItem)=>{
+                addInventoryUsage(
+                    shopItemUsage,
+                    comboItem.item,
+                    comboItem.quantity * orderItem.quantity,
+                    comboItem.item?.item?.name || "item"
+                );
+            });
+        }
+    });
+
+    return {
+        shopItemUsage:[...shopItemUsage.values()],
+        comboUsage:[...comboUsage.values()]
+    };
+};
+
 const createOrder = asyncHandler(async(req,res)=>{
     const {
         shopId,
@@ -264,94 +366,47 @@ const createOrder = asyncHandler(async(req,res)=>{
         ? false
         : paymentReceived === true || String(paymentReceived).toLowerCase() === "true";
 
-    const order = await prisma.$transaction(async(tx)=>{
-        for(const usage of shopItemQuantityUsage.values()){
-            if(usage.availableQuantity === null) continue;
-
-            const updatedShopItems = await tx.shopItem.updateMany({
-                where:{
-                    id:usage.id,
-                    availableQuantity:{
-                        gte:usage.quantity
-                    }
-                },
-                data:{
-                    availableQuantity:{
-                        decrement:usage.quantity
-                    }
-                }
-            });
-
-            if(updatedShopItems.count !== 1){
-                throw new apiError(400,`${usage.name} does not have enough quantity`);
+    const order = await prisma.order.create({
+        data:{
+            userId:currentUser.id,
+            shopId:shop.id,
+            currentOrderStatus:"NEW",
+            paymentMethod:normalizedPaymentMethod,
+            paymentReceived:normalizedPaymentReceived,
+            subtotalAmount,
+            deliveryAmount:normalizedDeliveryAmount,
+            totalAmount:subtotalAmount + normalizedDeliveryAmount,
+            customerNote:customerNote || undefined,
+            orderItems:{
+                create:orderItemsToCreate
             }
-        }
-
-        for(const selectedCombo of normalizedCombos){
-            const combo = combosData.find((currentCombo)=>currentCombo.id === String(selectedCombo.comboId));
-            if(combo.availableQuantity === null) continue;
-
-            const updatedCombos = await tx.combo.updateMany({
-                where:{
-                    id:combo.id,
-                    availableQuantity:{
-                        gte:selectedCombo.quantity
-                    }
-                },
-                data:{
-                    availableQuantity:{
-                        decrement:selectedCombo.quantity
-                    }
-                }
-            });
-
-            if(updatedCombos.count !== 1){
-                throw new apiError(400,`${combo.name} does not have enough quantity`);
-            }
-        }
-
-        return tx.order.create({
-            data:{
-                userId:currentUser.id,
-                shopId:shop.id,
-                currentOrderStatus:"NEW",
-                paymentMethod:normalizedPaymentMethod,
-                paymentReceived:normalizedPaymentReceived,
-                subtotalAmount,
-                deliveryAmount:normalizedDeliveryAmount,
-                totalAmount:subtotalAmount + normalizedDeliveryAmount,
-                customerNote:customerNote || undefined,
-                orderItems:{
-                    create:orderItemsToCreate
+        },
+        include:{
+            user:{
+                select:{
+                    id:true,
+                    name:true,
+                    phone:true
                 }
             },
-            include:{
-                user:{
-                    select:{
-                        id:true,
-                        name:true,
-                        phone:true
-                    }
-                },
-                shop:{
-                    select:{
-                        id:true,
-                        shopName:true,
-                        ownerId:true
-                    }
-                },
-                orderItems:{
-                    include:{
-                        shopItem:{
-                            include:{
-                                item:true
-                            }
-                        },
-                        combo:true
-                    }
+            shop:{
+                select:{
+                    id:true,
+                    shopName:true,
+                    ownerId:true
+                }
+            },
+            orderItems:{
+                include:{
+                    shopItem:{
+                        include:{
+                            item:true
+                        }
+                    },
+                    combo:true
                 }
             }
-        });
+        }
     });
 
     return res.status(201).json(new apiResponse(201,order,"order created successfully"));
@@ -632,45 +687,69 @@ const confirmOrder = asyncHandler(async(req,res)=>{
         where:{
             id:orderId
         },
-        include:{
-            shop:{
-                select:{
-                    id:true,
-                    shopName:true,
-                    ownerId:true
-                }
-            }
-        }
+        include:orderInventoryInclude
     });
 
     if(!order) throw new apiError(404,"order not found");
     if(!order.shop || order.shop.ownerId !== currentUser.id) throw new apiError(403,"You can only manage orders for your own shop");
     if(order.currentOrderStatus !== "NEW") throw new apiError(400,"only new orders can be confirmed");
 
-    const updatedOrder = await prisma.order.update({
-        where:{
-            id:order.id
-        },
-        data:{
-            currentOrderStatus:"PREPARING"
-        },
-        include:{
-            user:{
-                select:{
-                    id:true,
-                    name:true,
-                    phone:true
+    const {shopItemUsage,comboUsage} = getOrderInventoryUsage(order);
+
+    const updatedOrder = await prisma.$transaction(async(tx)=>{
+        for(const usage of shopItemUsage){
+            if(usage.availableQuantity === null) continue;
+
+            const updatedShopItems = await tx.shopItem.updateMany({
+                where:{
+                    id:usage.id,
+                    availableQuantity:{
+                        gte:usage.quantity
+                    }
+                },
+                data:{
+                    availableQuantity:{
+                        decrement:usage.quantity
+                    }
                 }
-            },
-            shop:{
-                select:{
-                    id:true,
-                    shopName:true,
-                    ownerId:true
-                }
-            },
-            orderItems:true
+            });
+
+            if(updatedShopItems.count !== 1){
+                throw new apiError(400,`${usage.name} does not have enough quantity`);
+            }
         }
+
+        for(const usage of comboUsage){
+            if(usage.availableQuantity === null) continue;
+
+            const updatedCombos = await tx.combo.updateMany({
+                where:{
+                    id:usage.id,
+                    availableQuantity:{
+                        gte:usage.quantity
+                    }
+                },
+                data:{
+                    availableQuantity:{
+                        decrement:usage.quantity
+                    }
+                }
+            });
+
+            if(updatedCombos.count !== 1){
+                throw new apiError(400,`${usage.name} does not have enough quantity`);
+            }
+        }
+
+        return tx.order.update({
+            where:{
+                id:order.id
+            },
+            data:{
+                currentOrderStatus:"PREPARING"
+            },
+            include:orderResponseInclude
+        });
     });
 
     return res.status(200).json(new apiResponse(200,updatedOrder,"order confirmed successfully"));
@@ -781,30 +860,36 @@ const markOrderComplete = asyncHandler(async(req,res)=>{
     if(!order.shop || order.shop.ownerId !== currentUser.id) throw new apiError(403,"You can only manage orders for your own shop");
     if(order.currentOrderStatus !== "READY") throw new apiError(400,"only ready orders can be completed");
 
-    const updatedOrder = await prisma.order.update({
-        where:{
-            id:order.id
-        },
-        data:{
-            currentOrderStatus:"DONE"
-        },
-        include:{
-            user:{
-                select:{
-                    id:true,
-                    name:true,
-                    phone:true
-                }
+    const updatedOrder = await prisma.$transaction(async(tx)=>{
+        const completedOrder = await tx.order.update({
+            where:{
+                id:order.id
             },
-            shop:{
-                select:{
-                    id:true,
-                    shopName:true,
-                    ownerId:true
-                }
+            data:{
+                currentOrderStatus:"DONE"
             },
-            orderItems:true
-        }
+            include:orderResponseInclude
+        });
+
+        await tx.buyerCompletedOffer.upsert({
+            where:{
+                orderId:order.id
+            },
+            update:{
+                buyerId:order.userId,
+                shopId:order.shop.id,
+                totalAmount:order.totalAmount,
+                completedAt:new Date()
+            },
+            create:{
+                buyerId:order.userId,
+                shopId:order.shop.id,
+                orderId:order.id,
+                totalAmount:order.totalAmount
+            }
+        });
+
+        return completedOrder;
     });
 
     return res.status(200).json(new apiResponse(200,updatedOrder,"order completed successfully"));
@@ -832,15 +917,7 @@ const cancelOrder = asyncHandler(async(req,res)=>{
         where:{
             id:orderId
         },
-        include:{
-            shop:{
-                select:{
-                    id:true,
-                    shopName:true,
-                    ownerId:true
-                }
-            }
-        }
+        include:orderInventoryInclude
     });
 
     if(!order) throw new apiError(404,"order not found");
@@ -857,30 +934,53 @@ const cancelOrder = asyncHandler(async(req,res)=>{
         throw new apiError(400,"completed or cancelled orders cannot be cancelled");
     }
 
-    const updatedOrder = await prisma.order.update({
-        where:{
-            id:order.id
-        },
-        data:{
-            currentOrderStatus:"CANCELLED"
-        },
-        include:{
-            user:{
-                select:{
-                    id:true,
-                    name:true,
-                    phone:true
-                }
-            },
-            shop:{
-                select:{
-                    id:true,
-                    shopName:true,
-                    ownerId:true
-                }
-            },
-            orderItems:true
+    const shouldRestoreInventory = order.currentOrderStatus === "PREPARING" || order.currentOrderStatus === "READY";
+    const {shopItemUsage,comboUsage} = getOrderInventoryUsage(order);
+
+    const updatedOrder = await prisma.$transaction(async(tx)=>{
+        if(shouldRestoreInventory){
+            for(const usage of shopItemUsage){
+                await tx.shopItem.updateMany({
+                    where:{
+                        id:usage.id,
+                        availableQuantity:{
+                            not:null
+                        }
+                    },
+                    data:{
+                        availableQuantity:{
+                            increment:usage.quantity
+                        }
+                    }
+                });
+            }
+
+            for(const usage of comboUsage){
+                await tx.combo.updateMany({
+                    where:{
+                        id:usage.id,
+                        availableQuantity:{
+                            not:null
+                        }
+                    },
+                    data:{
+                        availableQuantity:{
+                            increment:usage.quantity
+                        }
+                    }
+                });
+            }
         }
+
+        return tx.order.update({
+            where:{
+                id:order.id
+            },
+            data:{
+                currentOrderStatus:"CANCELLED"
+            },
+            include:orderResponseInclude
+        });
     });
 
     return res.status(200).json(new apiResponse(200,updatedOrder,"order cancelled successfully"));

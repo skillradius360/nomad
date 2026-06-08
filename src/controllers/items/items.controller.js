@@ -1,5 +1,6 @@
 import { prisma } from "../../db/index.js";
 import { apiError, apiResponse, asyncHandler } from "../../utils/handler.js";
+import { cloudUploader } from "../../utils/cloudinary.upload.js";
 
 const masterItemInclude = {
     category:{
@@ -14,6 +15,11 @@ const masterItemInclude = {
                     slug:true
                 }
             }
+        }
+    },
+    tags:{
+        include:{
+            tag:true
         }
     }
 };
@@ -102,8 +108,6 @@ const createItems = asyncHandler(async(req,res)=>{
         name,
         itemName,
         description,
-        imageUrl,
-        photoUrl,
         sortOrderId,
         sortOrder,
         categoryId,
@@ -114,6 +118,13 @@ const createItems = asyncHandler(async(req,res)=>{
     const itemTitle = itemName || name;
 
     if(!itemTitle) throw new apiError(400,"item name is required");
+
+
+    const itemImg = req.files?.itemImg?.[0]?.path;
+    if(!itemImg) throw new apiError(400,"image not passed for item creation")
+
+    const imgUrl = await cloudUploader(itemImg);
+    if(!imgUrl?.url) throw new apiError(400,"image upload failure")
 
     const category = await resolveCategory({categoryId,categoryName,cuisineName,cuisineId});
 
@@ -133,7 +144,7 @@ const createItems = asyncHandler(async(req,res)=>{
         data:{
             name:itemTitle,
             description,
-            imageUrl:imageUrl || photoUrl,
+            imageUrl:imgUrl.url,
             sortOrderId:Number(sortOrderId ?? sortOrder ?? 0),
             categoryId:category?.id
         },
@@ -342,6 +353,148 @@ const fetchItemsByShop = asyncHandler(async(req,res)=>{
     },"shop items fetched successfully"));
 });
 
+// admin: reorder master catalog items
+const reorderItems = asyncHandler(async(req,res)=>{
+    const {itemIds,categoryId,categoryName,cuisineId,cuisineName} = req.body;
+
+    if(!Array.isArray(itemIds) || itemIds.length === 0){
+        throw new apiError(400,"itemIds must be a non-empty array");
+    }
+
+    const uniqueItemIds = [...new Set(itemIds.map((itemId)=>String(itemId)).filter(Boolean))];
+    if(uniqueItemIds.length !== itemIds.length){
+        throw new apiError(400,"duplicate item ids are not allowed");
+    }
+
+    const category = await resolveCategory({categoryId,categoryName,cuisineId,cuisineName});
+
+    const items = await prisma.items.findMany({
+        where:{
+            id:{
+                in:uniqueItemIds
+            },
+            ...(category?.id ? {
+                categoryId:category.id
+            } : {})
+        },
+        select:{
+            id:true
+        }
+    });
+
+    if(items.length !== uniqueItemIds.length){
+        throw new apiError(400,"one or more item ids are invalid");
+    }
+
+    const updatedItems = await prisma.$transaction(
+        uniqueItemIds.map((itemId,index)=>{
+            return prisma.items.update({
+                where:{
+                    id:itemId
+                },
+                data:{
+                    sortOrderId:index + 1
+                },
+                include:masterItemInclude
+            });
+        })
+    );
+
+    return res.status(200).json(new apiResponse(200,updatedItems,"items reordered successfully"));
+});
+
+// admin or seller: reorder items inside a seller shop
+const reorderShopItems = asyncHandler(async(req,res)=>{
+    const {shopId,shopItemIds,categoryId,categoryName,cuisineId,cuisineName} = req.body;
+
+    if(!shopId) throw new apiError(400,"shop id is required");
+    if(!Array.isArray(shopItemIds) || shopItemIds.length === 0){
+        throw new apiError(400,"shopItemIds must be a non-empty array");
+    }
+
+    const uniqueShopItemIds = [...new Set(shopItemIds.map((shopItemId)=>String(shopItemId)).filter(Boolean))];
+    if(uniqueShopItemIds.length !== shopItemIds.length){
+        throw new apiError(400,"duplicate shop item ids are not allowed");
+    }
+
+    const currentUser = await prisma.user.findUnique({
+        where:{
+            id:req.userData?.id
+        },
+        select:{
+            id:true,
+            role:true,
+            isBlocked:true
+        }
+    });
+
+    if(!currentUser || currentUser.isBlocked) throw new apiError(401,"User blocked or unauthorized");
+
+    const shop = await prisma.shop.findUnique({
+        where:{
+            id:shopId
+        },
+        select:{
+            id:true,
+            ownerId:true
+        }
+    });
+
+    if(!shop) throw new apiError(404,"shop not found");
+    if(currentUser.role !== "ADMIN" && shop.ownerId !== currentUser.id){
+        throw new apiError(403,"You can only reorder items for your own shop");
+    }
+
+    const cuisine = await resolveCuisine({cuisineId,cuisineName});
+    const category = await resolveCategory({categoryId,categoryName,cuisineId,cuisineName});
+
+    const shopItems = await prisma.shopItem.findMany({
+        where:{
+            id:{
+                in:uniqueShopItemIds
+            },
+            shopId,
+            ...(category?.id ? {
+                item:{
+                    categoryId:category.id
+                }
+            } : {}),
+            ...(cuisine?.id && !category?.id ? {
+                item:{
+                    category:{
+                        is:{
+                            cuisineId:cuisine.id
+                        }
+                    }
+                }
+            } : {})
+        },
+        select:{
+            id:true
+        }
+    });
+
+    if(shopItems.length !== uniqueShopItemIds.length){
+        throw new apiError(400,"one or more shop item ids are invalid");
+    }
+
+    const updatedShopItems = await prisma.$transaction(
+        uniqueShopItemIds.map((shopItemId,index)=>{
+            return prisma.shopItem.update({
+                where:{
+                    id:shopItemId
+                },
+                data:{
+                    sortOrderId:index + 1
+                },
+                include:shopItemInclude
+            });
+        })
+    );
+
+    return res.status(200).json(new apiResponse(200,updatedShopItems,"shop items reordered successfully"));
+});
+
 const editShopItem = asyncHandler(async(req,res)=>{
     const {shopItemId} = req.params;
     const {
@@ -391,6 +544,34 @@ const editShopItem = asyncHandler(async(req,res)=>{
         throw new apiError(403,"You can only edit items for your own shop");
     }
 
+    if(pricing !== undefined && pricing !== null && pricing !== ""){
+        const updatedPrice = Number(pricing);
+        if(!Number.isFinite(updatedPrice) || updatedPrice < 0){
+            throw new apiError(400,"pricing must be a valid non-negative number");
+        }
+    }
+
+    if(discount !== undefined && discount !== null){
+        const updatedDiscount = Number(discount);
+        if(!Number.isFinite(updatedDiscount) || updatedDiscount < 0){
+            throw new apiError(400,"discount must be a valid non-negative number");
+        }
+    }
+
+    if(discountPercentage !== undefined && discountPercentage !== null){
+        const updatedDiscountPercentage = Number(discountPercentage);
+        if(!Number.isFinite(updatedDiscountPercentage) || updatedDiscountPercentage < 0){
+            throw new apiError(400,"discountPercentage must be a valid non-negative number");
+        }
+    }
+
+    const itemImg = req.files?.itemImg?.[0]?.path;
+    let uploadedImageUrl = null;
+    if(itemImg){
+        const imgUrl = await cloudUploader(itemImg);
+        if(!imgUrl?.url) throw new apiError(400,"image upload failure")
+        uploadedImageUrl = imgUrl.url;
+    }
     const dataToUpdate = {};
 
     if(pricing !== undefined) dataToUpdate.pricing = String(pricing);
@@ -398,7 +579,7 @@ const editShopItem = asyncHandler(async(req,res)=>{
     if(discountPercentage !== undefined) dataToUpdate.discountPercentage = discountPercentage === null ? null : Number(discountPercentage);
     if(availableQuantity !== undefined) dataToUpdate.availableQuantity = availableQuantity === null ? null : Number(availableQuantity);
     if(description !== undefined) dataToUpdate.description = description;
-    if(imageUrl !== undefined || photoUrl !== undefined) dataToUpdate.imageUrl = imageUrl || photoUrl;
+    if(uploadedImageUrl || imageUrl !== undefined || photoUrl !== undefined) dataToUpdate.imageUrl = uploadedImageUrl || imageUrl || photoUrl;
     if(sortOrderId !== undefined || sortOrder !== undefined) dataToUpdate.sortOrderId = sortOrderId === null || sortOrder === null ? null : Number(sortOrderId ?? sortOrder);
     if(active !== undefined) dataToUpdate.active = active;
 
@@ -411,6 +592,47 @@ const editShopItem = asyncHandler(async(req,res)=>{
         data:dataToUpdate,
         include:shopItemInclude
     });
+
+    if(pricing !== undefined || discount !== undefined || discountPercentage !== undefined){
+        const affectedCombos = await prisma.combo.findMany({
+            where:{
+                shopId:updatedShopItem.shopId,
+                items:{
+                    some:{
+                        itemId:updatedShopItem.id
+                    }
+                }
+            },
+            include:{
+                items:{
+                    include:{
+                        item:true
+                    }
+                }
+            }
+        });
+
+        for(const combo of affectedCombos){
+            const recalculatedTotalPrice = combo.items.reduce((sum,comboItem)=>{
+                const itemPrice = Number(comboItem.item.pricing);
+                const itemDiscount = Number(comboItem.item.discount ?? 0);
+                const itemPercentageDiscount = Number(comboItem.item.discountPercentage ?? 0);
+                const itemFinalPrice = Math.max(0,Math.round(itemPrice - itemDiscount - (itemPrice * itemPercentageDiscount / 100)));
+                return sum + itemFinalPrice * comboItem.quantity;
+            },0);
+            const recalculatedFinalPrice = Math.max(0,Math.round(recalculatedTotalPrice - Number(combo.discount ?? 0) - (recalculatedTotalPrice * Number(combo.percentageDiscount ?? 0) / 100)));
+
+            await prisma.combo.update({
+                where:{
+                    id:combo.id
+                },
+                data:{
+                    totalPrice:recalculatedTotalPrice,
+                    finalPrice:recalculatedFinalPrice
+                }
+            });
+        }
+    }
 
     return res.status(200).json(new apiResponse(200,updatedShopItem,"shop item updated successfully"));
 });
@@ -481,12 +703,19 @@ const editItem = asyncHandler(async(req,res)=>{
 
     if(!itemId) throw new apiError(400,"item id is required");
 
+    const itemImg = req.files?.itemImg?.[0]?.path;
+    let uploadedImageUrl = null;
+    if(itemImg){
+        const imgUrl = await cloudUploader(itemImg);
+        if(!imgUrl?.url) throw new apiError(400,"image upload failure")
+        uploadedImageUrl = imgUrl.url;
+    }
     const dataToUpdate = {};
     const updatedName = itemName || name;
 
     if(updatedName) dataToUpdate.name = updatedName;
     if(description !== undefined) dataToUpdate.description = description;
-    if(imageUrl !== undefined || photoUrl !== undefined) dataToUpdate.imageUrl = imageUrl || photoUrl;
+    if(uploadedImageUrl || imageUrl !== undefined || photoUrl !== undefined) dataToUpdate.imageUrl = uploadedImageUrl || imageUrl || photoUrl;
     if(sortOrderId !== undefined || sortOrder !== undefined) dataToUpdate.sortOrderId = Number(sortOrderId ?? sortOrder);
     if(active !== undefined) dataToUpdate.active = active;
 
@@ -555,6 +784,23 @@ const addPersonalProduct = asyncHandler(async(req,res)=>{
     if(!masterItemId && !customItemName) throw new apiError(400,"item id or item name is required");
     if(pricing === undefined || pricing === null || pricing === "") throw new apiError(400,"pricing is required");
 
+    const shopItemPrice = Number(pricing);
+    const shopItemDiscount = Number(discount ?? 0);
+    const shopItemDiscountPercentage = Number(discountPercentage ?? 0);
+    const shopItemAvailableQuantity = Number(availableQuantity ?? 0);
+
+    if(!Number.isFinite(shopItemPrice) || shopItemPrice < 0){
+        throw new apiError(400,"pricing must be a valid non-negative number");
+    }
+
+    if(!Number.isFinite(shopItemDiscount) || shopItemDiscount < 0 || !Number.isFinite(shopItemDiscountPercentage) || shopItemDiscountPercentage < 0){
+        throw new apiError(400,"discount values must be valid non-negative numbers");
+    }
+
+    if(!Number.isFinite(shopItemAvailableQuantity) || shopItemAvailableQuantity < 0){
+        throw new apiError(400,"availableQuantity must be a valid non-negative number");
+    }
+
     const shop = await prisma.shop.findUnique({
         where:{
             id:shopId
@@ -569,6 +815,14 @@ const addPersonalProduct = asyncHandler(async(req,res)=>{
     if(!shop) throw new apiError(404,"shop not found");
     if(shop.ownerId !== sellerId) throw new apiError(403,"You can only create products for your own shop");
 
+    const itemImg = req.files?.itemImg?.[0]?.path;
+    let uploadedImageUrl = null;
+    if(itemImg){
+        const imgUrl = await cloudUploader(itemImg);
+        if(!imgUrl?.url) throw new apiError(400,"image upload failure")
+        uploadedImageUrl = imgUrl.url;
+    }
+    const requestedImageUrl = uploadedImageUrl || imageUrl || photoUrl;
     const category = await resolveCategory({categoryId,categoryName,cuisineName,cuisineId,required:!masterItemId});
 
     let masterItem = null;
@@ -598,7 +852,7 @@ const addPersonalProduct = asyncHandler(async(req,res)=>{
                 data:{
                     name:customItemName,
                     description,
-                    imageUrl:imageUrl || photoUrl,
+                    imageUrl:requestedImageUrl,
                     sortOrderId:Number(sortOrderId ?? sortOrder ?? 0),
                     categoryId:category.id
                 },
@@ -622,12 +876,12 @@ const addPersonalProduct = asyncHandler(async(req,res)=>{
         data:{
             shopId,
             itemId:masterItem.id,
-            pricing:String(pricing),
-            discount:discount === undefined || discount === null ? 0 : Number(discount),
-            discountPercentage:discountPercentage === undefined || discountPercentage === null ? 0 : Number(discountPercentage),
-            availableQuantity:availableQuantity === undefined || availableQuantity === null ? 0 : Number(availableQuantity),
+            pricing:String(shopItemPrice),
+            discount:shopItemDiscount,
+            discountPercentage:shopItemDiscountPercentage,
+            availableQuantity:shopItemAvailableQuantity,
             description,
-            imageUrl:imageUrl || photoUrl,
+            imageUrl:requestedImageUrl,
             sortOrderId:Number(sortOrderId ?? sortOrder ?? 0),
             active:active ?? true
         },
@@ -637,4 +891,4 @@ const addPersonalProduct = asyncHandler(async(req,res)=>{
     return res.status(201).json(new apiResponse(201,shopItem,"item added to shop successfully"));
 });
 
-export { createItems, mapItems, fetchItemsToCategory, fetchAllItems, fetchOnlyItems, fetchItemsByShop, editShopItem, deleteShopItem, editItem, deleteItem, addPersonalProduct };
+export { createItems, mapItems, fetchItemsToCategory, fetchAllItems, fetchOnlyItems, fetchItemsByShop, reorderItems, reorderShopItems, editShopItem, deleteShopItem, editItem, deleteItem, addPersonalProduct };

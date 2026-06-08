@@ -23,6 +23,11 @@ const comboInclude = {
             slug:true
         }
     },
+    tags:{
+        include:{
+            tag:true
+        }
+    },
     items:{
         include:{
             item:{
@@ -263,7 +268,10 @@ const createCombo = asyncHandler(async(req,res)=>{
 
     const calculatedTotalPrice = comboItems.reduce((sum,comboItem)=>{
         const itemPrice = Number(comboItem.item.pricing);
-        return sum + (Number.isFinite(itemPrice) ? itemPrice : 0) * comboItem.quantity;
+        const itemDiscount = Number(comboItem.item.discount ?? 0);
+        const itemPercentageDiscount = Number(comboItem.item.discountPercentage ?? 0);
+        const itemFinalPrice = Math.max(0,Math.round(itemPrice - itemDiscount - (itemPrice * itemPercentageDiscount / 100)));
+        return sum + itemFinalPrice * comboItem.quantity;
     },0);
 
     const comboTotalPrice = totalPrice === undefined || totalPrice === null || totalPrice === ""
@@ -285,6 +293,15 @@ const createCombo = asyncHandler(async(req,res)=>{
 
     if(comboDiscount < 0 || comboPercentageDiscount < 0 || comboFinalPrice < 0){
         throw new apiError(400,"combo pricing cannot be negative");
+    }
+
+    if(comboItems.some((comboItem)=>{
+        const itemPrice = Number(comboItem.item.pricing);
+        const itemDiscount = Number(comboItem.item.discount ?? 0);
+        const itemPercentageDiscount = Number(comboItem.item.discountPercentage ?? 0);
+        return !Number.isFinite(itemPrice) || itemPrice < 0 || !Number.isFinite(itemDiscount) || itemDiscount < 0 || !Number.isFinite(itemPercentageDiscount) || itemPercentageDiscount < 0;
+    })){
+        throw new apiError(400,"selected item pricing must be valid non-negative numbers");
     }
 
     const combo = await prisma.combo.create({
@@ -330,7 +347,11 @@ const editCombo = asyncHandler(async(req,res)=>{
             shopId:true,
             name:true,
             cuisineId:true,
-            categoryId:true
+            categoryId:true,
+            totalPrice:true,
+            discount:true,
+            percentageDiscount:true,
+            finalPrice:true
         }
     });
 
@@ -543,7 +564,10 @@ const editCombo = asyncHandler(async(req,res)=>{
 
         const calculatedTotalPrice = comboItems.reduce((sum,comboItem)=>{
             const itemPrice = Number(comboItem.item.pricing);
-            return sum + (Number.isFinite(itemPrice) ? itemPrice : 0) * comboItem.quantity;
+            const itemDiscount = Number(comboItem.item.discount ?? 0);
+            const itemPercentageDiscount = Number(comboItem.item.discountPercentage ?? 0);
+            const itemFinalPrice = Math.max(0,Math.round(itemPrice - itemDiscount - (itemPrice * itemPercentageDiscount / 100)));
+            return sum + itemFinalPrice * comboItem.quantity;
         },0);
 
         const comboTotalPrice = req.body.totalPrice === undefined || req.body.totalPrice === null || req.body.totalPrice === ""
@@ -567,6 +591,15 @@ const editCombo = asyncHandler(async(req,res)=>{
             throw new apiError(400,"combo pricing cannot be negative");
         }
 
+        if(comboItems.some((comboItem)=>{
+            const itemPrice = Number(comboItem.item.pricing);
+            const itemDiscount = Number(comboItem.item.discount ?? 0);
+            const itemPercentageDiscount = Number(comboItem.item.discountPercentage ?? 0);
+            return !Number.isFinite(itemPrice) || itemPrice < 0 || !Number.isFinite(itemDiscount) || itemDiscount < 0 || !Number.isFinite(itemPercentageDiscount) || itemPercentageDiscount < 0;
+        })){
+            throw new apiError(400,"selected item pricing must be valid non-negative numbers");
+        }
+
         dataToUpdate.comboKey = comboKey;
         dataToUpdate.totalPrice = comboTotalPrice;
         dataToUpdate.discount = comboDiscount;
@@ -584,6 +617,25 @@ const editCombo = asyncHandler(async(req,res)=>{
         if(req.body.discount !== undefined) dataToUpdate.discount = Number(req.body.discount);
         if(req.body.percentageDiscount !== undefined) dataToUpdate.percentageDiscount = Number(req.body.percentageDiscount);
         if(req.body.finalPrice !== undefined) dataToUpdate.finalPrice = Number(req.body.finalPrice);
+
+        if(req.body.totalPrice !== undefined || req.body.discount !== undefined || req.body.percentageDiscount !== undefined || req.body.finalPrice !== undefined){
+            const activeTotalPrice = dataToUpdate.totalPrice ?? existingCombo.totalPrice;
+            const activeDiscount = dataToUpdate.discount ?? existingCombo.discount;
+            const activePercentageDiscount = dataToUpdate.percentageDiscount ?? existingCombo.percentageDiscount;
+            const activeFinalPrice = req.body.finalPrice === undefined
+                ? Math.max(0,Math.round(activeTotalPrice - activeDiscount - (activeTotalPrice * activePercentageDiscount / 100)))
+                : dataToUpdate.finalPrice;
+
+            if(!Number.isFinite(activeTotalPrice) || !Number.isFinite(activeDiscount) || !Number.isFinite(activePercentageDiscount) || !Number.isFinite(activeFinalPrice)){
+                throw new apiError(400,"combo pricing must be valid numbers");
+            }
+
+            if(activeTotalPrice < 0 || activeDiscount < 0 || activePercentageDiscount < 0 || activeFinalPrice < 0){
+                throw new apiError(400,"combo pricing cannot be negative");
+            }
+
+            dataToUpdate.finalPrice = activeFinalPrice;
+        }
 
         const shouldRebuildComboKey = dataToUpdate.name !== undefined ||
             dataToUpdate.shopId !== undefined ||

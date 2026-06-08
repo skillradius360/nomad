@@ -4,6 +4,7 @@ import {
     deleteMenu,
     editMenu,
     fetchRunningMenusByShop,
+    reorderMenus,
 } from "../controllers/menu/menu.controller.js";
 import { verifyJWT } from "../middleware/auth.middleware.js";
 
@@ -13,4 +14,5 @@ menuRouter.use(verifyJWT);
 
 menuRouter.route("/shop/:shopId/running").get(fetchRunningMenusByShop);
 menuRouter.route("/create").post(createMenu);
+menuRouter.route("/reorder").patch(reorderMenus);
 menuRouter.route("/:menuId").patch(editMenu).delete(deleteMenu);

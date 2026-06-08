@@ -181,6 +181,73 @@ const createCategory = asyncHandler(async(req,res)=>{
             if(!categories) throw new apiError(404,"categories not found")
             return res.status(200).json(new apiResponse(200,categories,"categories fetched successfully"))
     })
+
+// admin
+    const reorderCategories = asyncHandler(async(req,res)=>{
+            const {categoryIds,cuisineId,cuisineName} = req.body
+
+            if(!Array.isArray(categoryIds) || categoryIds.length === 0){
+                throw new apiError(400,"categoryIds must be a non-empty array")
+            }
+
+            const uniqueCategoryIds = [...new Set(categoryIds.map((categoryId)=>String(categoryId)).filter(Boolean))]
+
+            if(uniqueCategoryIds.length !== categoryIds.length){
+                throw new apiError(400,"duplicate category ids are not allowed")
+            }
+
+            let cuisineData = null
+            if(cuisineId || cuisineName){
+                cuisineData = await prisma.cuisine.findFirst({
+                    where:cuisineId ? {
+                        id:String(cuisineId)
+                    } : {
+                        OR:[
+                            {name:{equals:cuisineName,mode:"insensitive"}},
+                            {slug:String(cuisineName).toUpperCase()}
+                        ]
+                    },
+                    select:{
+                        id:true
+                    }
+                })
+
+                if(!cuisineData) throw new apiError(404,"cuisine not found")
+            }
+
+            const categories = await prisma.categories.findMany({
+                where:{
+                    id:{
+                        in:uniqueCategoryIds
+                    },
+                    ...(cuisineData?.id ? {
+                        cuisineId:cuisineData.id
+                    } : {})
+                },
+                select:{
+                    id:true
+                }
+            })
+
+            if(categories.length !== uniqueCategoryIds.length){
+                throw new apiError(400,"one or more category ids are invalid")
+            }
+
+            const updatedCategories = await prisma.$transaction(
+                uniqueCategoryIds.map((categoryId,index)=>{
+                    return prisma.categories.update({
+                        where:{
+                            id:categoryId
+                        },
+                        data:{
+                            sortOrderId:index + 1
+                        }
+                    })
+                })
+            )
+
+            return res.status(200).json(new apiResponse(200,updatedCategories,"categories reordered successfully"))
+    })
     
     
 // admin
@@ -226,4 +293,4 @@ const createCategory = asyncHandler(async(req,res)=>{
             return res.status(200).json(new apiResponse(200,deletedCategory,"category deleted successfully"))
     })
     
-export { createCategory, mapCategories, fetchCategoryToCuisine, fetchAllCategories, fetchOnlyCategories, editCategory, deleteCategory }
+export { createCategory, mapCategories, fetchCategoryToCuisine, fetchAllCategories, fetchOnlyCategories, reorderCategories, editCategory, deleteCategory }

@@ -62,6 +62,51 @@ const fetchOnlyCuisines = asyncHandler(async(req,res)=>{
 })
 
 // admin
+const reorderCuisines = asyncHandler(async(req,res)=>{
+    const {cuisineIds} = req.body
+
+    if(!Array.isArray(cuisineIds) || cuisineIds.length === 0){
+        throw new apiError(400,"cuisineIds must be a non-empty array")
+    }
+
+    const uniqueCuisineIds = [...new Set(cuisineIds.map((cuisineId)=>String(cuisineId)).filter(Boolean))]
+
+    if(uniqueCuisineIds.length !== cuisineIds.length){
+        throw new apiError(400,"duplicate cuisine ids are not allowed")
+    }
+
+    const cuisines = await prisma.cuisine.findMany({
+        where:{
+            id:{
+                in:uniqueCuisineIds
+            }
+        },
+        select:{
+            id:true
+        }
+    })
+
+    if(cuisines.length !== uniqueCuisineIds.length){
+        throw new apiError(400,"one or more cuisine ids are invalid")
+    }
+
+    const updatedCuisines = await prisma.$transaction(
+        uniqueCuisineIds.map((cuisineId,index)=>{
+            return prisma.cuisine.update({
+                where:{
+                    id:cuisineId
+                },
+                data:{
+                    sortOrderId:index + 1
+                }
+            })
+        })
+    )
+
+    return res.status(200).json(new apiResponse(200,updatedCuisines,"cuisines reordered successfully"))
+})
+
+// admin
 const editCuisine = asyncHandler(async(req,res)=>{
     const {cuisineId} = req.params
     const {cuisineName,sortOrderId,sortOrder} = req.body
@@ -105,4 +150,4 @@ const deleteCuisine = asyncHandler(async(req,res)=>{
     return res.status(200).json(new apiResponse(200,deletedCuisine,"cuisine deleted successfully"))
 })
 
-export { createCuisine, fetchAllCuisines, fetchOnlyCuisines, editCuisine, deleteCuisine }
+export { createCuisine, fetchAllCuisines, fetchOnlyCuisines, reorderCuisines, editCuisine, deleteCuisine }

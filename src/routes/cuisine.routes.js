@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { createCuisine, deleteCuisine, editCuisine, fetchAllCuisines, fetchOnlyCuisines } from "../controllers/cuisine/cuisine.controller.js";
+import { createCuisine, deleteCuisine, editCuisine, fetchAllCuisines, fetchOnlyCuisines, reorderCuisines } from "../controllers/cuisine/cuisine.controller.js";
 import { isAdmin } from "../middleware/admin.middleware.js";
 import { verifyJWT } from "../middleware/auth.middleware.js";
 
@@ -9,6 +9,7 @@ cuisineRouter.use(verifyJWT);
 
 cuisineRouter.route("/").get(fetchAllCuisines);
 cuisineRouter.route("/create").post(isAdmin, createCuisine);
+cuisineRouter.route("/reorder").patch(isAdmin, reorderCuisines);
 cuisineRouter.route("/fetchallcuisines").get(fetchAllCuisines);
 cuisineRouter.route("/only").get(fetchOnlyCuisines);
 cuisineRouter.route("/:cuisineId").patch(isAdmin, editCuisine).delete(isAdmin, deleteCuisine);
