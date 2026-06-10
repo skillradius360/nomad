@@ -8,7 +8,12 @@ const masterItemInclude = {
             id:true,
             name:true,
             slug:true,
-            cuisine:{
+            cuisineId:true
+        }
+    },
+    tags:{
+        select:{
+            tag:{
                 select:{
                     id:true,
                     name:true,
@@ -16,25 +21,52 @@ const masterItemInclude = {
                 }
             }
         }
-    },
-    tags:{
-        include:{
-            tag:true
-        }
     }
 };
 
 const shopItemInclude = {
-    shop:{
-        select:{
-            id:true,
-            shopName:true,
-            ownerId:true
-        }
-    },
     item:{
         include:masterItemInclude
     }
+};
+
+const shopItemListSelect = {
+    id:true,
+    shopId:true,
+    itemId:true,
+    pricing:true,
+    availableQuantity:true,
+    imageUrl:true,
+    description:true,
+    sortOrderId:true,
+    active:true,
+    item:{
+        select:{
+            id:true,
+            name:true,
+            imageUrl:true,
+            categoryId:true,
+            category:{
+                select:{
+                    id:true,
+                    name:true,
+                    slug:true,
+                    cuisineId:true
+                }
+            }
+        }
+    }
+};
+
+const parseBooleanField = (value,fieldName)=>{
+    if(value === undefined) return undefined;
+    if(typeof value === "boolean") return value;
+    if(typeof value === "string"){
+        const normalizedValue = value.trim().toLowerCase();
+        if(normalizedValue === "true") return true;
+        if(normalizedValue === "false") return false;
+    }
+    throw new apiError(400,`${fieldName} must be a boolean`);
 };
 
 const resolveCuisine = async({cuisineId,cuisineName})=>{
@@ -340,7 +372,7 @@ const fetchItemsByShop = asyncHandler(async(req,res)=>{
         orderBy:{
             sortOrderId:"asc"
         },
-        include:shopItemInclude
+        select:shopItemListSelect
     });
 
     return res.status(200).json(new apiResponse(200,{
@@ -499,8 +531,6 @@ const editShopItem = asyncHandler(async(req,res)=>{
     const {shopItemId} = req.params;
     const {
         pricing,
-        discount,
-        discountPercentage,
         availableQuantity,
         description,
         imageUrl,
@@ -551,20 +581,6 @@ const editShopItem = asyncHandler(async(req,res)=>{
         }
     }
 
-    if(discount !== undefined && discount !== null){
-        const updatedDiscount = Number(discount);
-        if(!Number.isFinite(updatedDiscount) || updatedDiscount < 0){
-            throw new apiError(400,"discount must be a valid non-negative number");
-        }
-    }
-
-    if(discountPercentage !== undefined && discountPercentage !== null){
-        const updatedDiscountPercentage = Number(discountPercentage);
-        if(!Number.isFinite(updatedDiscountPercentage) || updatedDiscountPercentage < 0){
-            throw new apiError(400,"discountPercentage must be a valid non-negative number");
-        }
-    }
-
     const itemImg = req.files?.itemImg?.[0]?.path;
     let uploadedImageUrl = null;
     if(itemImg){
@@ -575,13 +591,11 @@ const editShopItem = asyncHandler(async(req,res)=>{
     const dataToUpdate = {};
 
     if(pricing !== undefined) dataToUpdate.pricing = String(pricing);
-    if(discount !== undefined) dataToUpdate.discount = discount === null ? null : Number(discount);
-    if(discountPercentage !== undefined) dataToUpdate.discountPercentage = discountPercentage === null ? null : Number(discountPercentage);
     if(availableQuantity !== undefined) dataToUpdate.availableQuantity = availableQuantity === null ? null : Number(availableQuantity);
     if(description !== undefined) dataToUpdate.description = description;
     if(uploadedImageUrl || imageUrl !== undefined || photoUrl !== undefined) dataToUpdate.imageUrl = uploadedImageUrl || imageUrl || photoUrl;
     if(sortOrderId !== undefined || sortOrder !== undefined) dataToUpdate.sortOrderId = sortOrderId === null || sortOrder === null ? null : Number(sortOrderId ?? sortOrder);
-    if(active !== undefined) dataToUpdate.active = active;
+    if(active !== undefined) dataToUpdate.active = parseBooleanField(active,"active");
 
     if(Object.keys(dataToUpdate).length === 0) throw new apiError(400,"no shop item data passed");
 
@@ -593,7 +607,7 @@ const editShopItem = asyncHandler(async(req,res)=>{
         include:shopItemInclude
     });
 
-    if(pricing !== undefined || discount !== undefined || discountPercentage !== undefined){
+    if(pricing !== undefined){
         const affectedCombos = await prisma.combo.findMany({
             where:{
                 shopId:updatedShopItem.shopId,
@@ -605,8 +619,14 @@ const editShopItem = asyncHandler(async(req,res)=>{
             },
             include:{
                 items:{
-                    include:{
-                        item:true
+                    select:{
+                        quantity:true,
+                        item:{
+                            select:{
+                                id:true,
+                                pricing:true
+                            }
+                        }
                     }
                 }
             }
@@ -615,10 +635,7 @@ const editShopItem = asyncHandler(async(req,res)=>{
         for(const combo of affectedCombos){
             const recalculatedTotalPrice = combo.items.reduce((sum,comboItem)=>{
                 const itemPrice = Number(comboItem.item.pricing);
-                const itemDiscount = Number(comboItem.item.discount ?? 0);
-                const itemPercentageDiscount = Number(comboItem.item.discountPercentage ?? 0);
-                const itemFinalPrice = Math.max(0,Math.round(itemPrice - itemDiscount - (itemPrice * itemPercentageDiscount / 100)));
-                return sum + itemFinalPrice * comboItem.quantity;
+                return sum + itemPrice * comboItem.quantity;
             },0);
             const recalculatedFinalPrice = Math.max(0,Math.round(recalculatedTotalPrice - Number(combo.discount ?? 0) - (recalculatedTotalPrice * Number(combo.percentageDiscount ?? 0) / 100)));
 
@@ -717,7 +734,7 @@ const editItem = asyncHandler(async(req,res)=>{
     if(description !== undefined) dataToUpdate.description = description;
     if(uploadedImageUrl || imageUrl !== undefined || photoUrl !== undefined) dataToUpdate.imageUrl = uploadedImageUrl || imageUrl || photoUrl;
     if(sortOrderId !== undefined || sortOrder !== undefined) dataToUpdate.sortOrderId = Number(sortOrderId ?? sortOrder);
-    if(active !== undefined) dataToUpdate.active = active;
+    if(active !== undefined) dataToUpdate.active = parseBooleanField(active,"active");
 
     if(categoryId !== undefined || categoryName !== undefined){
         const category = await resolveCategory({categoryId,categoryName,cuisineName,cuisineId,required:true});
@@ -766,8 +783,6 @@ const addPersonalProduct = asyncHandler(async(req,res)=>{
         itemName,
         name,
         pricing,
-        discount,
-        discountPercentage,
         availableQuantity,
         description,
         imageUrl,
@@ -785,16 +800,10 @@ const addPersonalProduct = asyncHandler(async(req,res)=>{
     if(pricing === undefined || pricing === null || pricing === "") throw new apiError(400,"pricing is required");
 
     const shopItemPrice = Number(pricing);
-    const shopItemDiscount = Number(discount ?? 0);
-    const shopItemDiscountPercentage = Number(discountPercentage ?? 0);
     const shopItemAvailableQuantity = Number(availableQuantity ?? 0);
 
     if(!Number.isFinite(shopItemPrice) || shopItemPrice < 0){
         throw new apiError(400,"pricing must be a valid non-negative number");
-    }
-
-    if(!Number.isFinite(shopItemDiscount) || shopItemDiscount < 0 || !Number.isFinite(shopItemDiscountPercentage) || shopItemDiscountPercentage < 0){
-        throw new apiError(400,"discount values must be valid non-negative numbers");
     }
 
     if(!Number.isFinite(shopItemAvailableQuantity) || shopItemAvailableQuantity < 0){
@@ -877,13 +886,11 @@ const addPersonalProduct = asyncHandler(async(req,res)=>{
             shopId,
             itemId:masterItem.id,
             pricing:String(shopItemPrice),
-            discount:shopItemDiscount,
-            discountPercentage:shopItemDiscountPercentage,
             availableQuantity:shopItemAvailableQuantity,
             description,
             imageUrl:requestedImageUrl,
             sortOrderId:Number(sortOrderId ?? sortOrder ?? 0),
-            active:active ?? true
+            active:parseBooleanField(active,"active") ?? true
         },
         include:shopItemInclude
     });

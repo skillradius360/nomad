@@ -2,6 +2,7 @@ import { Router } from "express";
 import {
     createSeller,
     createSellerByAdmin,
+    deleteSeller,
     getSellerProfile,
     updateSellerProfile,
 } from "../controllers/sellers/seller.controller.js";
@@ -15,5 +16,5 @@ sellerRouter.use(verifyJWT);
 sellerRouter.route("/create/:userId").post(isAdmin, createSellerByAdmin);
 
 sellerRouter.route("/create").post(createSeller);
-sellerRouter.route("/me").get(isSeller, getSellerProfile)
+sellerRouter.route("/me").get(isSeller, getSellerProfile).delete(isSeller, deleteSeller)
 sellerRouter.route("/edit").patch(isSeller, updateSellerProfile);

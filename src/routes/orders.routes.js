@@ -9,7 +9,8 @@ import {
     getSellerProcessedOrders,
     markPaymentReceived,
     markOrderComplete,
-    markOrderReady
+    markOrderReady,
+    refundCompletedOrder
 } from "../controllers/orders/orders.controller.js";
 import { verifyJWT } from "../middleware/auth.middleware.js";
 
@@ -30,3 +31,4 @@ orderRouter.route("/:orderId/confirm").patch(confirmOrder);
 orderRouter.route("/:orderId/ready").patch(markOrderReady);
 orderRouter.route("/:orderId/complete").patch(markOrderComplete);
 orderRouter.route("/:orderId/cancel").patch(cancelOrder);
+orderRouter.route("/:orderId/refund").patch(refundCompletedOrder);

@@ -259,7 +259,7 @@ const assignTagsToItem = asyncHandler(async(req,res)=>{
             }
         });
     });
-
+     throw new apiError(400 , " transaction failure in the case of assigning tags to items provided")
     return res.status(200).json(new apiResponse(200,updatedItem,"item tags updated successfully"));
 });
 
@@ -319,7 +319,7 @@ const assignTagsToCombo = asyncHandler(async(req,res)=>{
             }
         });
     });
-
+    if (!updatedCombo) throw new apiError(400, "combo updation transaction failure !")
     return res.status(200).json(new apiResponse(200,updatedCombo,"combo tags updated successfully"));
 });
 

@@ -14,6 +14,8 @@ import { menuRouter } from "./routes/menu.routes.js";
 import { orderRouter } from "./routes/orders.routes.js";
 import { adRouter } from "./routes/ads.routes.js";
 import { tagRouter } from "./routes/tags.routes.js";
+import { offerRouter } from "./routes/offers.routes.js";
+import { revenueRouter } from "./routes/revenue.routes.js";
 import { asyncHandler } from "./utils/asyncHandler.js";
 import { verifyJWT } from "./middleware/auth.middleware.js";
 import apiError from "./utils/apiError.js";
@@ -62,6 +64,8 @@ app.use("/menus", menuRouter);
 app.use("/orders", orderRouter);
 app.use("/ads", adRouter);
 app.use("/tags", tagRouter);
+app.use("/offers", offerRouter);
+app.use("/revenue", revenueRouter);
 
 app.get("/", (req, res) => {
   const logo = `
@@ -105,4 +109,3 @@ app.get("/", (req, res) => {
 app.listen(8000,()=>{
     console.log("this is the express server listening")
 })
-// http://13.206.206.50:8000/health

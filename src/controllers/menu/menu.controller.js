@@ -350,17 +350,44 @@ const createMenu = asyncHandler(async(req,res)=>{
             },
             schedules:true,
             items:{
-                include:{
+                select:{
+                    id:true,
+                    active:true,
+                    sortOrderId:true,
                     item:{
-                        include:{
-                            item:true
+                        select:{
+                            id:true,
+                            pricing:true,
+                            availableQuantity:true,
+                            imageUrl:true,
+                            description:true,
+                            item:{
+                                select:{
+                                    id:true,
+                                    name:true,
+                                    imageUrl:true,
+                                    categoryId:true
+                                }
+                            }
                         }
                     }
                 }
             },
             combos:{
-                include:{
-                    combo:true
+                select:{
+                    id:true,
+                    active:true,
+                    sortOrderId:true,
+                    combo:{
+                        select:{
+                            id:true,
+                            name:true,
+                            imageUrl:true,
+                            totalPrice:true,
+                            finalPrice:true,
+                            availableQuantity:true
+                        }
+                    }
                 }
             }
         }
@@ -582,17 +609,44 @@ const editMenu = asyncHandler(async(req,res)=>{
             },
             schedules:true,
             items:{
-                include:{
+                select:{
+                    id:true,
+                    active:true,
+                    sortOrderId:true,
                     item:{
-                        include:{
-                            item:true
+                        select:{
+                            id:true,
+                            pricing:true,
+                            availableQuantity:true,
+                            imageUrl:true,
+                            description:true,
+                            item:{
+                                select:{
+                                    id:true,
+                                    name:true,
+                                    imageUrl:true,
+                                    categoryId:true
+                                }
+                            }
                         }
                     }
                 }
             },
             combos:{
-                include:{
-                    combo:true
+                select:{
+                    id:true,
+                    active:true,
+                    sortOrderId:true,
+                    combo:{
+                        select:{
+                            id:true,
+                            name:true,
+                            imageUrl:true,
+                            totalPrice:true,
+                            finalPrice:true,
+                            availableQuantity:true
+                        }
+                    }
                 }
             }
         }
@@ -787,10 +841,25 @@ const fetchRunningMenusByShop = asyncHandler(async(req,res)=>{
                 orderBy:{
                     sortOrderId:"asc"
                 },
-                include:{
+                select:{
+                    id:true,
+                    active:true,
+                    sortOrderId:true,
                     item:{
-                        include:{
-                            item:true
+                        select:{
+                            id:true,
+                            pricing:true,
+                            availableQuantity:true,
+                            imageUrl:true,
+                            description:true,
+                            item:{
+                                select:{
+                                    id:true,
+                                    name:true,
+                                    imageUrl:true,
+                                    categoryId:true
+                                }
+                            }
                         }
                     }
                 }
@@ -802,8 +871,20 @@ const fetchRunningMenusByShop = asyncHandler(async(req,res)=>{
                 orderBy:{
                     sortOrderId:"asc"
                 },
-                include:{
-                    combo:true
+                select:{
+                    id:true,
+                    active:true,
+                    sortOrderId:true,
+                    combo:{
+                        select:{
+                            id:true,
+                            name:true,
+                            imageUrl:true,
+                            totalPrice:true,
+                            finalPrice:true,
+                            availableQuantity:true
+                        }
+                    }
                 }
             }
         },

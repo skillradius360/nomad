@@ -12,19 +12,45 @@ const orderInventoryInclude = {
         }
     },
     orderItems:{
-        include:{
+        select:{
+            id:true,
+            orderItemType:true,
+            shopItemId:true,
+            comboId:true,
+            name:true,
+            quantity:true,
+            priceAtOrderTime:true,
+            totalPrice:true,
             shopItem:{
-                include:{
-                    item:true
+                select:{
+                    id:true,
+                    availableQuantity:true,
+                    item:{
+                        select:{
+                            id:true,
+                            name:true
+                        }
+                    }
                 }
             },
             combo:{
-                include:{
+                select:{
+                    id:true,
+                    name:true,
+                    availableQuantity:true,
                     items:{
-                        include:{
+                        select:{
+                            quantity:true,
                             item:{
-                                include:{
-                                    item:true
+                                select:{
+                                    id:true,
+                                    availableQuantity:true,
+                                    item:{
+                                        select:{
+                                            id:true,
+                                            name:true
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -50,7 +76,18 @@ const orderResponseInclude = {
             ownerId:true
         }
     },
-    orderItems:true
+    orderItems:{
+        select:{
+            id:true,
+            orderItemType:true,
+            shopItemId:true,
+            comboId:true,
+            name:true,
+            quantity:true,
+            priceAtOrderTime:true,
+            totalPrice:true
+        }
+    }
 };
 
 const addInventoryUsage = (usageMap, inventoryItem, quantity, name)=>{
@@ -115,7 +152,10 @@ const createOrder = asyncHandler(async(req,res)=>{
         items,
         itemIds,
         combos,
-        comboIds
+        comboIds,
+        offerId,
+        offerIds,
+        appliedOfferIds
     } = req.body;
 
     if(!shopId) throw new apiError(400,"shop id is required");
@@ -362,9 +402,223 @@ const createOrder = asyncHandler(async(req,res)=>{
         throw new apiError(400,"deliveryAmount must be a valid number");
     }
 
+    const rawOfferInput = appliedOfferIds ?? offerIds ?? offerId;
+    let selectedOfferIds = [];
+    if(Array.isArray(rawOfferInput)){
+        selectedOfferIds = rawOfferInput.map(String).filter(Boolean);
+    }else if(typeof rawOfferInput === "string" && rawOfferInput.trim()){
+        const trimmedOfferInput = rawOfferInput.trim();
+        selectedOfferIds = trimmedOfferInput.startsWith("[")
+            ? JSON.parse(trimmedOfferInput).map(String).filter(Boolean)
+            : [trimmedOfferInput];
+    }else if(rawOfferInput){
+        selectedOfferIds = [String(rawOfferInput)];
+    }
+
+    if(new Set(selectedOfferIds).size !== selectedOfferIds.length){
+        throw new apiError(400,"duplicate offer ids are not allowed");
+    }
+
+    const selectedItemQuantityById = new Map();
+    const selectedComboQuantityById = new Map();
+    const selectedItemTotalById = new Map();
+    const selectedComboTotalById = new Map();
+    const selectedItemUnitPriceById = new Map();
+    const selectedComboUnitPriceById = new Map();
+
+    orderItemsToCreate.forEach((orderItem)=>{
+        if(orderItem.orderItemType === "ITEM"){
+            selectedItemQuantityById.set(orderItem.shopItemId,(selectedItemQuantityById.get(orderItem.shopItemId) || 0) + orderItem.quantity);
+            selectedItemTotalById.set(orderItem.shopItemId,(selectedItemTotalById.get(orderItem.shopItemId) || 0) + orderItem.totalPrice);
+            selectedItemUnitPriceById.set(orderItem.shopItemId,orderItem.priceAtOrderTime);
+            return;
+        }
+
+        if(orderItem.orderItemType === "COMBO"){
+            selectedComboQuantityById.set(orderItem.comboId,(selectedComboQuantityById.get(orderItem.comboId) || 0) + orderItem.quantity);
+            selectedComboTotalById.set(orderItem.comboId,(selectedComboTotalById.get(orderItem.comboId) || 0) + orderItem.totalPrice);
+            selectedComboUnitPriceById.set(orderItem.comboId,orderItem.priceAtOrderTime);
+        }
+    });
+
+    let discountAmount = 0;
+    let deliveryDiscountAmount = 0;
+    const appliedOffers = [];
+
+    if(selectedOfferIds.length > 0){
+        const now = new Date();
+        const offersData = await prisma.offer.findMany({
+            where:{
+                id:{
+                    in:selectedOfferIds
+                },
+                shopId,
+                active:true,
+                startsAt:{
+                    lte:now
+                },
+                endsAt:{
+                    gte:now
+                }
+            },
+            include:{
+                items:true,
+                combos:true,
+                buyers:true
+            }
+        });
+
+        if(offersData.length !== selectedOfferIds.length){
+            throw new apiError(400,"one or more offers are invalid or inactive for this shop");
+        }
+
+        if(selectedOfferIds.length > 1 && offersData.some((offer)=>offer.stackingMode !== "STACKABLE")){
+            throw new apiError(400,"exclusive offers cannot be combined");
+        }
+
+        const hasNewCustomerOffer = offersData.some((offer)=>offer.audienceType === "NEW_CUSTOMERS");
+        const completedOffer = hasNewCustomerOffer
+            ? await prisma.buyerCompletedOffer.findFirst({
+                where:{
+                    buyerId:currentUser.id,
+                    shopId
+                },
+                select:{
+                    id:true
+                }
+            })
+            : null;
+
+        for(const offer of offersData){
+            const appliesToItemIds = offer.items.filter((item)=>item.role === "APPLIES_TO").map((item)=>item.shopItemId);
+            const buyItemIds = offer.items.filter((item)=>item.role === "CUSTOMER_BUYS").map((item)=>item.shopItemId);
+            const rewardItemIds = offer.items.filter((item)=>item.role === "CUSTOMER_GETS").map((item)=>item.shopItemId);
+            const appliesToComboIds = offer.combos.filter((combo)=>combo.role === "APPLIES_TO").map((combo)=>combo.comboId);
+            const buyComboIds = offer.combos.filter((combo)=>combo.role === "CUSTOMER_BUYS").map((combo)=>combo.comboId);
+            const rewardComboIds = offer.combos.filter((combo)=>combo.role === "CUSTOMER_GETS").map((combo)=>combo.comboId);
+
+            if(offer.audienceType === "SPECIFIC_BUYERS" && !offer.buyers.some((buyer)=>buyer.buyerId === currentUser.id)){
+                throw new apiError(400,`${offer.title} is not available for this buyer`);
+            }
+            if(offer.audienceType === "PREMIUM_CUSTOMERS" && currentUser.billingPlan !== "ACTIVE"){
+                throw new apiError(400,`${offer.title} is only available for premium customers`);
+            }
+            if(offer.audienceType === "NEW_CUSTOMERS" && completedOffer){
+                throw new apiError(400,`${offer.title} is only available for new customers`);
+            }
+            if(offer.audienceType === "TAG_BASED"){
+                throw new apiError(400,`${offer.title} cannot be applied at checkout yet`);
+            }
+            if(offer.minOrderAmount !== null && offer.minOrderAmount !== undefined && subtotalAmount < offer.minOrderAmount){
+                throw new apiError(400,`${offer.title} requires minimum order amount ${offer.minOrderAmount}`);
+            }
+
+            let targetAmount = 0;
+            let targetQuantity = 0;
+
+            if(offer.applyTo === "ALL_CART"){
+                targetAmount = subtotalAmount;
+                targetQuantity = orderItemsToCreate.reduce((total,orderItem)=>total + orderItem.quantity,0);
+            }
+
+            if(offer.applyTo === "SPECIFIC_ITEMS"){
+                appliesToItemIds.forEach((shopItemId)=>{
+                    targetAmount += selectedItemTotalById.get(shopItemId) || 0;
+                    targetQuantity += selectedItemQuantityById.get(shopItemId) || 0;
+                });
+            }
+
+            if(offer.applyTo === "SPECIFIC_COMBOS"){
+                appliesToComboIds.forEach((comboId)=>{
+                    targetAmount += selectedComboTotalById.get(comboId) || 0;
+                    targetQuantity += selectedComboQuantityById.get(comboId) || 0;
+                });
+            }
+
+            if(offer.applyTo === "ALL_ITEMS_IN_SELECTED_COMBOS"){
+                appliesToComboIds.forEach((comboId)=>{
+                    targetAmount += selectedComboTotalById.get(comboId) || 0;
+                    targetQuantity += selectedComboQuantityById.get(comboId) || 0;
+                });
+            }
+
+            if(offer.offerType === "FREE_DELIVERY"){
+                targetAmount = normalizedDeliveryAmount;
+                targetQuantity = 1;
+            }
+
+            if(offer.minQuantity !== null && offer.minQuantity !== undefined && targetQuantity < offer.minQuantity){
+                throw new apiError(400,`${offer.title} requires minimum quantity ${offer.minQuantity}`);
+            }
+
+            if(targetAmount <= 0 && offer.offerType !== "BUY_X_GET_Y"){
+                throw new apiError(400,`${offer.title} does not apply to selected cart items`);
+            }
+
+            let currentOfferDiscount = 0;
+            let currentDeliveryDiscount = 0;
+
+            if(offer.offerType === "BUY_X_GET_Y"){
+                let buyQuantity = 0;
+                buyItemIds.forEach((shopItemId)=>{
+                    buyQuantity += selectedItemQuantityById.get(shopItemId) || 0;
+                });
+                buyComboIds.forEach((comboId)=>{
+                    buyQuantity += selectedComboQuantityById.get(comboId) || 0;
+                });
+
+                if(buyQuantity < (offer.minQuantity || 1)){
+                    throw new apiError(400,`${offer.title} buy quantity requirement is not met`);
+                }
+
+                const rewardUnitPrices = [];
+                rewardItemIds.forEach((shopItemId)=>{
+                    const quantity = selectedItemQuantityById.get(shopItemId) || 0;
+                    const unitPrice = selectedItemUnitPriceById.get(shopItemId) || 0;
+                    for(let index = 0; index < quantity; index += 1) rewardUnitPrices.push(unitPrice);
+                });
+                rewardComboIds.forEach((comboId)=>{
+                    const quantity = selectedComboQuantityById.get(comboId) || 0;
+                    const unitPrice = selectedComboUnitPriceById.get(comboId) || 0;
+                    for(let index = 0; index < quantity; index += 1) rewardUnitPrices.push(unitPrice);
+                });
+
+                rewardUnitPrices.sort((firstPrice,secondPrice)=>firstPrice - secondPrice);
+                currentOfferDiscount = rewardUnitPrices.slice(0,offer.rewardQuantity || 1).reduce((total,price)=>total + price,0);
+            }else if(offer.offerType === "FREE_DELIVERY"){
+                currentDeliveryDiscount = normalizedDeliveryAmount;
+            }else if(offer.discountType === "PERCENTAGE"){
+                currentOfferDiscount = Math.round(targetAmount * Number(offer.discountValue || 0) / 100);
+            }else if(offer.discountType === "FLAT"){
+                currentOfferDiscount = Math.min(Math.round(Number(offer.discountValue || 0)),targetAmount);
+            }else if(offer.discountType === "FREE"){
+                currentOfferDiscount = targetAmount;
+            }else{
+                throw new apiError(400,`${offer.title} has no usable discount configuration`);
+            }
+
+            if(offer.maxDiscountAmount !== null && offer.maxDiscountAmount !== undefined && currentOfferDiscount > offer.maxDiscountAmount){
+                currentOfferDiscount = offer.maxDiscountAmount;
+            }
+
+            currentOfferDiscount = Math.min(currentOfferDiscount,Math.max(subtotalAmount - discountAmount,0));
+            currentDeliveryDiscount = Math.min(currentDeliveryDiscount,Math.max(normalizedDeliveryAmount - deliveryDiscountAmount,0));
+
+            discountAmount += currentOfferDiscount;
+            deliveryDiscountAmount += currentDeliveryDiscount;
+            appliedOffers.push({
+                id:offer.id,
+                title:offer.title,
+                discountAmount:currentOfferDiscount,
+                deliveryDiscountAmount:currentDeliveryDiscount
+            });
+        }
+    }
+
     const normalizedPaymentReceived = paymentReceived === undefined || paymentReceived === null
         ? false
         : paymentReceived === true || String(paymentReceived).toLowerCase() === "true";
+    const totalAmount = Math.max(0,subtotalAmount - discountAmount + normalizedDeliveryAmount - deliveryDiscountAmount);
 
     const order = await prisma.order.create({
         data:{
@@ -374,42 +628,23 @@ const createOrder = asyncHandler(async(req,res)=>{
             paymentMethod:normalizedPaymentMethod,
             paymentReceived:normalizedPaymentReceived,
             subtotalAmount,
+            discountAmount,
             deliveryAmount:normalizedDeliveryAmount,
-            totalAmount:subtotalAmount + normalizedDeliveryAmount,
+            deliveryDiscountAmount,
+            totalAmount,
+            paidAmount:normalizedPaymentReceived ? totalAmount : 0,
             customerNote:customerNote || undefined,
             orderItems:{
                 create:orderItemsToCreate
             }
         },
-        include:{
-            user:{
-                select:{
-                    id:true,
-                    name:true,
-                    phone:true
-                }
-            },
-            shop:{
-                select:{
-                    id:true,
-                    shopName:true,
-                    ownerId:true
-                }
-            },
-            orderItems:{
-                include:{
-                    shopItem:{
-                        include:{
-                            item:true
-                        }
-                    },
-                    combo:true
-                }
-            }
-        }
+        include:orderResponseInclude
     });
 
-    return res.status(201).json(new apiResponse(201,order,"order created successfully"));
+    return res.status(201).json(new apiResponse(201,{
+        ...order,
+        appliedOffers
+    },"order created successfully"));
 });
 
 const getMyOrders = asyncHandler(async(req,res)=>{
@@ -438,7 +673,18 @@ const getMyOrders = asyncHandler(async(req,res)=>{
                     ownerId:true
                 }
             },
-            orderItems:true
+            orderItems:{
+                select:{
+                    id:true,
+                    orderItemType:true,
+                    shopItemId:true,
+                    comboId:true,
+                    name:true,
+                    quantity:true,
+                    priceAtOrderTime:true,
+                    totalPrice:true
+                }
+            }
         },
         orderBy:{
             createdAt:"desc"
@@ -487,7 +733,18 @@ const getSellerOrders = asyncHandler(async(req,res)=>{
                     ownerId:true
                 }
             },
-            orderItems:true
+            orderItems:{
+                select:{
+                    id:true,
+                    orderItemType:true,
+                    shopItemId:true,
+                    comboId:true,
+                    name:true,
+                    quantity:true,
+                    priceAtOrderTime:true,
+                    totalPrice:true
+                }
+            }
         },
         orderBy:{
             createdAt:"asc"
@@ -534,7 +791,18 @@ const getSellerProcessedOrders = asyncHandler(async(req,res)=>{
                     ownerId:true
                 }
             },
-            orderItems:true
+            orderItems:{
+                select:{
+                    id:true,
+                    orderItemType:true,
+                    shopItemId:true,
+                    comboId:true,
+                    name:true,
+                    quantity:true,
+                    priceAtOrderTime:true,
+                    totalPrice:true
+                }
+            }
         },
         orderBy:{
             updatedAt:"desc"
@@ -585,7 +853,18 @@ const getAllProcessedOrders = asyncHandler(async(req,res)=>{
                     }
                 }
             },
-            orderItems:true
+            orderItems:{
+                select:{
+                    id:true,
+                    orderItemType:true,
+                    shopItemId:true,
+                    comboId:true,
+                    name:true,
+                    quantity:true,
+                    priceAtOrderTime:true,
+                    totalPrice:true
+                }
+            }
         },
         orderBy:{
             updatedAt:"desc"
@@ -640,25 +919,10 @@ const markPaymentReceived = asyncHandler(async(req,res)=>{
             id:order.id
         },
         data:{
-            paymentReceived:true
+            paymentReceived:true,
+            paidAmount:order.totalAmount
         },
-        include:{
-            user:{
-                select:{
-                    id:true,
-                    name:true,
-                    phone:true
-                }
-            },
-            shop:{
-                select:{
-                    id:true,
-                    shopName:true,
-                    ownerId:true
-                }
-            },
-            orderItems:true
-        }
+        include:orderResponseInclude
     });
 
     return res.status(200).json(new apiResponse(200,updatedOrder,"payment marked received successfully"));
@@ -800,23 +1064,7 @@ const markOrderReady = asyncHandler(async(req,res)=>{
         data:{
             currentOrderStatus:"READY"
         },
-        include:{
-            user:{
-                select:{
-                    id:true,
-                    name:true,
-                    phone:true
-                }
-            },
-            shop:{
-                select:{
-                    id:true,
-                    shopName:true,
-                    ownerId:true
-                }
-            },
-            orderItems:true
-        }
+        include:orderResponseInclude
     });
 
     return res.status(200).json(new apiResponse(200,updatedOrder,"order marked ready successfully"));
@@ -860,16 +1108,70 @@ const markOrderComplete = asyncHandler(async(req,res)=>{
     if(!order.shop || order.shop.ownerId !== currentUser.id) throw new apiError(403,"You can only manage orders for your own shop");
     if(order.currentOrderStatus !== "READY") throw new apiError(400,"only ready orders can be completed");
 
+    const completedAt = new Date();
+    const dailyPeriodDate = new Date(completedAt.getFullYear(),completedAt.getMonth(),completedAt.getDate());
+    const monthlyPeriodDate = new Date(completedAt.getFullYear(),completedAt.getMonth(),1);
+    const yearlyPeriodDate = new Date(completedAt.getFullYear(),0,1);
+    const finalPaidAmount = order.paidAmount > 0 ? order.paidAmount : order.totalAmount;
+    const deliveryRevenue = Math.max((order.deliveryAmount || 0) - (order.deliveryDiscountAmount || 0),0);
+
     const updatedOrder = await prisma.$transaction(async(tx)=>{
         const completedOrder = await tx.order.update({
             where:{
                 id:order.id
             },
             data:{
-                currentOrderStatus:"DONE"
+                currentOrderStatus:"DONE",
+                paymentReceived:true,
+                paidAmount:finalPaidAmount,
+                completedAt
             },
             include:orderResponseInclude
         });
+
+        for(const periodData of [
+            { periodType:"DAILY", periodDate:dailyPeriodDate },
+            { periodType:"MONTHLY", periodDate:monthlyPeriodDate },
+            { periodType:"YEARLY", periodDate:yearlyPeriodDate }
+        ]){
+            await tx.shopRevenueSummary.upsert({
+                where:{
+                    shopId_periodType_periodDate:{
+                        shopId:order.shop.id,
+                        periodType:periodData.periodType,
+                        periodDate:periodData.periodDate
+                    }
+                },
+                update:{
+                    successfulOrders:{
+                        increment:1
+                    },
+                    grossRevenue:{
+                        increment:order.totalAmount
+                    },
+                    discountAmount:{
+                        increment:order.discountAmount + order.deliveryDiscountAmount
+                    },
+                    deliveryRevenue:{
+                        increment:deliveryRevenue
+                    },
+                    netRevenue:{
+                        increment:finalPaidAmount - order.refundAmount
+                    }
+                },
+                create:{
+                    shopId:order.shop.id,
+                    periodType:periodData.periodType,
+                    periodDate:periodData.periodDate,
+                    successfulOrders:1,
+                    grossRevenue:order.totalAmount,
+                    discountAmount:order.discountAmount + order.deliveryDiscountAmount,
+                    deliveryRevenue,
+                    refundAmount:0,
+                    netRevenue:finalPaidAmount - order.refundAmount
+                }
+            });
+        }
 
         await tx.buyerCompletedOffer.upsert({
             where:{
@@ -897,6 +1199,7 @@ const markOrderComplete = asyncHandler(async(req,res)=>{
 
 const cancelOrder = asyncHandler(async(req,res)=>{
     const { orderId } = req.params;
+    const { refundAmount } = req.body;
 
     if(!orderId) throw new apiError(400,"order id is required");
 
@@ -934,8 +1237,20 @@ const cancelOrder = asyncHandler(async(req,res)=>{
         throw new apiError(400,"completed or cancelled orders cannot be cancelled");
     }
 
+    const normalizedRefundAmount = refundAmount === undefined || refundAmount === null || refundAmount === ""
+        ? 0
+        : Number(refundAmount);
+
+    if(!Number.isInteger(normalizedRefundAmount) || normalizedRefundAmount < 0){
+        throw new apiError(400,"refundAmount must be a valid number");
+    }
+
     const shouldRestoreInventory = order.currentOrderStatus === "PREPARING" || order.currentOrderStatus === "READY";
     const {shopItemUsage,comboUsage} = getOrderInventoryUsage(order);
+    const cancelledAt = new Date();
+    const dailyPeriodDate = new Date(cancelledAt.getFullYear(),cancelledAt.getMonth(),cancelledAt.getDate());
+    const monthlyPeriodDate = new Date(cancelledAt.getFullYear(),cancelledAt.getMonth(),1);
+    const yearlyPeriodDate = new Date(cancelledAt.getFullYear(),0,1);
 
     const updatedOrder = await prisma.$transaction(async(tx)=>{
         if(shouldRestoreInventory){
@@ -972,18 +1287,166 @@ const cancelOrder = asyncHandler(async(req,res)=>{
             }
         }
 
-        return tx.order.update({
+        const cancelledOrder = await tx.order.update({
             where:{
                 id:order.id
             },
             data:{
-                currentOrderStatus:"CANCELLED"
+                currentOrderStatus:"CANCELLED",
+                refundAmount:normalizedRefundAmount,
+                cancelledAt,
+                refundedAt:normalizedRefundAmount > 0 ? cancelledAt : null
             },
             include:orderResponseInclude
         });
+
+        for(const periodData of [
+            { periodType:"DAILY", periodDate:dailyPeriodDate },
+            { periodType:"MONTHLY", periodDate:monthlyPeriodDate },
+            { periodType:"YEARLY", periodDate:yearlyPeriodDate }
+        ]){
+            await tx.shopRevenueSummary.upsert({
+                where:{
+                    shopId_periodType_periodDate:{
+                        shopId:order.shop.id,
+                        periodType:periodData.periodType,
+                        periodDate:periodData.periodDate
+                    }
+                },
+                update:{
+                    cancelledOrders:{
+                        increment:1
+                    },
+                    refundAmount:{
+                        increment:normalizedRefundAmount
+                    }
+                },
+                create:{
+                    shopId:order.shop.id,
+                    periodType:periodData.periodType,
+                    periodDate:periodData.periodDate,
+                    successfulOrders:0,
+                    cancelledOrders:1,
+                    grossRevenue:0,
+                    discountAmount:0,
+                    deliveryRevenue:0,
+                    refundAmount:normalizedRefundAmount,
+                    netRevenue:0
+                }
+            });
+        }
+
+        return cancelledOrder;
     });
 
     return res.status(200).json(new apiResponse(200,updatedOrder,"order cancelled successfully"));
+});
+
+const refundCompletedOrder = asyncHandler(async(req,res)=>{
+    const { orderId } = req.params;
+
+    if(!orderId) throw new apiError(400,"order id is required");
+
+    const currentUser = await prisma.user.findUnique({
+        where:{
+            id:req.userData?.id
+        },
+        select:{
+            id:true,
+            role:true,
+            billingPlan:true,
+            isBlocked:true
+        }
+    });
+
+    if(!currentUser || currentUser.isBlocked) throw new apiError(401,"User blocked or unauthorized");
+    if(currentUser.role !== "SELLER") throw new apiError(403,"Seller access required");
+
+    const order = await prisma.order.findUnique({
+        where:{
+            id:orderId
+        },
+        include:{
+            shop:{
+                select:{
+                    id:true,
+                    shopName:true,
+                    ownerId:true
+                }
+            }
+        }
+    });
+
+    if(!order) throw new apiError(404,"order not found");
+    if(!order.shop || order.shop.ownerId !== currentUser.id) throw new apiError(403,"You can only refund orders for your own shop");
+    if(order.currentOrderStatus !== "DONE") throw new apiError(400,"only completed orders can be refunded");
+
+    const paidAmount = order.paidAmount > 0 ? order.paidAmount : order.totalAmount;
+    const normalizedRefundAmount = paidAmount - order.refundAmount;
+
+    if(normalizedRefundAmount <= 0){
+        throw new apiError(400,"order is already fully refunded");
+    }
+
+    const refundedAt = new Date();
+    const dailyPeriodDate = new Date(refundedAt.getFullYear(),refundedAt.getMonth(),refundedAt.getDate());
+    const monthlyPeriodDate = new Date(refundedAt.getFullYear(),refundedAt.getMonth(),1);
+    const yearlyPeriodDate = new Date(refundedAt.getFullYear(),0,1);
+
+    const updatedOrder = await prisma.$transaction(async(tx)=>{
+        const refundedOrder = await tx.order.update({
+            where:{
+                id:order.id
+            },
+            data:{
+                refundAmount:{
+                    increment:normalizedRefundAmount
+                },
+                refundedAt
+            },
+            include:orderResponseInclude
+        });
+
+        for(const periodData of [
+            { periodType:"DAILY", periodDate:dailyPeriodDate },
+            { periodType:"MONTHLY", periodDate:monthlyPeriodDate },
+            { periodType:"YEARLY", periodDate:yearlyPeriodDate }
+        ]){
+            await tx.shopRevenueSummary.upsert({
+                where:{
+                    shopId_periodType_periodDate:{
+                        shopId:order.shop.id,
+                        periodType:periodData.periodType,
+                        periodDate:periodData.periodDate
+                    }
+                },
+                update:{
+                    refundAmount:{
+                        increment:normalizedRefundAmount
+                    },
+                    netRevenue:{
+                        decrement:normalizedRefundAmount
+                    }
+                },
+                create:{
+                    shopId:order.shop.id,
+                    periodType:periodData.periodType,
+                    periodDate:periodData.periodDate,
+                    successfulOrders:0,
+                    cancelledOrders:0,
+                    grossRevenue:0,
+                    discountAmount:0,
+                    deliveryRevenue:0,
+                    refundAmount:normalizedRefundAmount,
+                    netRevenue:-normalizedRefundAmount
+                }
+            });
+        }
+
+        return refundedOrder;
+    });
+
+    return res.status(200).json(new apiResponse(200,updatedOrder,"order refund recorded successfully"));
 });
 
 export {
@@ -996,5 +1459,6 @@ export {
     confirmOrder,
     markOrderReady,
     markOrderComplete,
-    cancelOrder
+    cancelOrder,
+    refundCompletedOrder
 };

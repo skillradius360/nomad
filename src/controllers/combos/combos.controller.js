@@ -24,35 +24,39 @@ const comboInclude = {
         }
     },
     tags:{
-        include:{
-            tag:true
+        select:{
+            tag:{
+                select:{
+                    id:true,
+                    name:true,
+                    slug:true
+                }
+            }
         }
     },
     items:{
-        include:{
+        select:{
+            id:true,
+            quantity:true,
             item:{
-                include:{
-                    shop:{
+                select:{
+                    id:true,
+                    pricing:true,
+                    availableQuantity:true,
+                    imageUrl:true,
+                    description:true,
+                    item:{
                         select:{
                             id:true,
-                            shopName:true,
-                            ownerId:true
-                        }
-                    },
-                    item:{
-                        include:{
+                            name:true,
+                            imageUrl:true,
+                            categoryId:true,
                             category:{
                                 select:{
                                     id:true,
                                     name:true,
                                     slug:true,
-                                    cuisine:{
-                                        select:{
-                                            id:true,
-                                            name:true,
-                                            slug:true
-                                        }
-                                    }
+                                    cuisineId:true
                                 }
                             }
                         }
@@ -268,10 +272,7 @@ const createCombo = asyncHandler(async(req,res)=>{
 
     const calculatedTotalPrice = comboItems.reduce((sum,comboItem)=>{
         const itemPrice = Number(comboItem.item.pricing);
-        const itemDiscount = Number(comboItem.item.discount ?? 0);
-        const itemPercentageDiscount = Number(comboItem.item.discountPercentage ?? 0);
-        const itemFinalPrice = Math.max(0,Math.round(itemPrice - itemDiscount - (itemPrice * itemPercentageDiscount / 100)));
-        return sum + itemFinalPrice * comboItem.quantity;
+        return sum + itemPrice * comboItem.quantity;
     },0);
 
     const comboTotalPrice = totalPrice === undefined || totalPrice === null || totalPrice === ""
@@ -297,9 +298,7 @@ const createCombo = asyncHandler(async(req,res)=>{
 
     if(comboItems.some((comboItem)=>{
         const itemPrice = Number(comboItem.item.pricing);
-        const itemDiscount = Number(comboItem.item.discount ?? 0);
-        const itemPercentageDiscount = Number(comboItem.item.discountPercentage ?? 0);
-        return !Number.isFinite(itemPrice) || itemPrice < 0 || !Number.isFinite(itemDiscount) || itemDiscount < 0 || !Number.isFinite(itemPercentageDiscount) || itemPercentageDiscount < 0;
+        return !Number.isFinite(itemPrice) || itemPrice < 0;
     })){
         throw new apiError(400,"selected item pricing must be valid non-negative numbers");
     }
@@ -564,10 +563,7 @@ const editCombo = asyncHandler(async(req,res)=>{
 
         const calculatedTotalPrice = comboItems.reduce((sum,comboItem)=>{
             const itemPrice = Number(comboItem.item.pricing);
-            const itemDiscount = Number(comboItem.item.discount ?? 0);
-            const itemPercentageDiscount = Number(comboItem.item.discountPercentage ?? 0);
-            const itemFinalPrice = Math.max(0,Math.round(itemPrice - itemDiscount - (itemPrice * itemPercentageDiscount / 100)));
-            return sum + itemFinalPrice * comboItem.quantity;
+            return sum + itemPrice * comboItem.quantity;
         },0);
 
         const comboTotalPrice = req.body.totalPrice === undefined || req.body.totalPrice === null || req.body.totalPrice === ""
@@ -593,9 +589,7 @@ const editCombo = asyncHandler(async(req,res)=>{
 
         if(comboItems.some((comboItem)=>{
             const itemPrice = Number(comboItem.item.pricing);
-            const itemDiscount = Number(comboItem.item.discount ?? 0);
-            const itemPercentageDiscount = Number(comboItem.item.discountPercentage ?? 0);
-            return !Number.isFinite(itemPrice) || itemPrice < 0 || !Number.isFinite(itemDiscount) || itemDiscount < 0 || !Number.isFinite(itemPercentageDiscount) || itemPercentageDiscount < 0;
+            return !Number.isFinite(itemPrice) || itemPrice < 0;
         })){
             throw new apiError(400,"selected item pricing must be valid non-negative numbers");
         }
@@ -846,6 +840,104 @@ const getCombosByShop = asyncHandler(async(req,res)=>{
     },"shop combos fetched successfully"));
 });
 
+const fetchCombosByClassification = asyncHandler(async(req,res)=>{
+    const {
+        shopId,
+        cuisineId,
+        cuisineName,
+        categoryId,
+        categoryName
+    } = req.query;
+
+    if(!shopId) throw new apiError(400,"shop id is required");
+    if(!cuisineId && !cuisineName && !categoryId && !categoryName){
+        throw new apiError(400,"cuisine or category filter is required");
+    }
+
+    const shop = await prisma.shop.findUnique({
+        where:{
+            id:shopId
+        },
+        select:{
+            id:true,
+            shopName:true
+        }
+    });
+
+    if(!shop) throw new apiError(404,"shop not found");
+
+    let cuisine = null;
+    if(cuisineId || cuisineName){
+        cuisine = await prisma.cuisine.findFirst({
+            where:cuisineId ? {
+                id:cuisineId
+            } : {
+                OR:[
+                    {name:{equals:cuisineName,mode:"insensitive"}},
+                    {slug:String(cuisineName).toUpperCase()}
+                ]
+            }
+        });
+
+        if(!cuisine) throw new apiError(404,"cuisine not found");
+    }
+
+    let category = null;
+    if(categoryId || categoryName){
+        const categoryWhere = categoryId ? {
+            id:categoryId
+        } : {
+            OR:[
+                {name:{equals:categoryName,mode:"insensitive"}},
+                {slug:String(categoryName).toUpperCase()}
+            ]
+        };
+
+        if(cuisine?.id){
+            categoryWhere.cuisineId = cuisine.id;
+        }
+
+        category = await prisma.categories.findFirst({
+            where:categoryWhere
+        });
+
+        if(!category){
+            throw new apiError(404,cuisine?.id ? "category not found for selected cuisine" : "category not found");
+        }
+    }
+
+    const combos = await prisma.combo.findMany({
+        where:{
+            shopId,
+            active:true,
+            ...(cuisine?.id ? {
+                cuisineId:cuisine.id
+            } : {}),
+            ...(category?.id ? {
+                categoryId:category.id
+            } : {})
+        },
+        orderBy:[
+            {
+                sortOrderId:"asc"
+            },
+            {
+                createdAt:"desc"
+            }
+        ],
+        include:comboInclude
+    });
+
+    return res.status(200).json(new apiResponse(200,{
+        shop,
+        selected:{
+            cuisine,
+            category
+        },
+        combos
+    },"filtered combos fetched successfully"));
+});
+
 const comboBuilder = asyncHandler(async(req,res)=>{
     const {
         shopId,
@@ -960,19 +1052,17 @@ const comboBuilder = asyncHandler(async(req,res)=>{
         },
         include:{
             item:{
-                include:{
+                select:{
+                    id:true,
+                    name:true,
+                    imageUrl:true,
+                    categoryId:true,
                     category:{
                         select:{
                             id:true,
                             name:true,
                             slug:true,
-                            cuisine:{
-                                select:{
-                                    id:true,
-                                    name:true,
-                                    slug:true
-                                }
-                            }
+                            cuisineId:true
                         }
                     }
                 }
@@ -991,4 +1081,4 @@ const comboBuilder = asyncHandler(async(req,res)=>{
     },"combo builder data fetched successfully"));
 });
 
-export { createCombo, editCombo, deleteCombo, getCombosByShop, comboBuilder };
+export { createCombo, editCombo, deleteCombo, getCombosByShop, fetchCombosByClassification, comboBuilder };

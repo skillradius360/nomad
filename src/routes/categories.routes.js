@@ -6,6 +6,7 @@ import {
     fetchAllCategories,
     fetchCategoryToCuisine,
     fetchOnlyCategories,
+    fetchShopCategories,
     mapCategories,
     reorderCategories,
 } from "../controllers/categories/categories.controller.js";
@@ -21,6 +22,7 @@ categoryRouter.route("/map").post(isAdmin, mapCategories);
 categoryRouter.route("/reorder").patch(isAdmin, reorderCategories);
 categoryRouter.route("/fetchallcategories").get(fetchAllCategories);
 categoryRouter.route("/only").get(fetchOnlyCategories);
+categoryRouter.route("/shop/:shopId").get(fetchShopCategories);
 categoryRouter.route("/cuisine").get(fetchCategoryToCuisine);
 categoryRouter.route("/cuisine/:cuisineName").get(fetchCategoryToCuisine);
 categoryRouter.route("/:categoryId").patch(isAdmin, editCategory).delete(isAdmin, deleteCategory);

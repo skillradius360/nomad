@@ -6,18 +6,27 @@ const createCategory = asyncHandler(async(req,res)=>{
 
     const {categoryName,sortOrder} = req.body
     if(!categoryName && !sortOrder) throw new apiError(400,"no category name passed")
+
+    const categorySlug = typeof categoryName==="string"?categoryName.toUpperCase():categoryName
+
+    const ifCategory = await prisma.categories.findUnique({
+        where:{
+            slug:categorySlug
+        }
+    })
+    if(ifCategory) throw new apiError(409,"category named the same already exists")
     
     const categoryCreate = await prisma.categories.create({
         data:{
             name:categoryName,
-            slug: typeof categoryName==="string"?categoryName.toUpperCase():categoryName,
+            slug:categorySlug,
             sortOrderId:sortOrder,
         }
     })
     if(!categoryCreate){
         throw new apiError(400,"category creation failure")
     }
-    return res.status(200).json(new apiResponse(200,createCategory,"created  category"))
+    return res.status(200).json(new apiResponse(200,categoryCreate,"created  category"))
 })
     
 
@@ -182,6 +191,76 @@ const createCategory = asyncHandler(async(req,res)=>{
             return res.status(200).json(new apiResponse(200,categories,"categories fetched successfully"))
     })
 
+    const fetchShopCategories = asyncHandler(async(req,res)=>{
+            const shopId = req.params.shopId || req.query.shopId
+
+            if(!shopId) throw new apiError(400,"shop id is required")
+
+            const currentUser = await prisma.user.findUnique({
+                where:{
+                    id:req.userData?.id
+                },
+                select:{
+                    id:true,
+                    role:true,
+                    isBlocked:true
+                }
+            })
+
+            if(!currentUser || currentUser.isBlocked) throw new apiError(401,"User blocked or unauthorized")
+
+            const shop = await prisma.shop.findUnique({
+                where:{
+                    id:shopId
+                },
+                select:{
+                    id:true,
+                    ownerId:true
+                }
+            })
+
+            if(!shop) throw new apiError(404,"shop not found")
+            if(currentUser.role !== "ADMIN" && shop.ownerId !== currentUser.id){
+                throw new apiError(403,"You can only fetch categories for your own shop")
+            }
+
+            const categories = await prisma.categories.findMany({
+                where:{
+                    active:true,
+                    allItems:{
+                        some:{
+                            active:true,
+                            shopItems:{
+                                some:{
+                                    shopId,
+                                    active:true
+                                }
+                            }
+                        }
+                    }
+                },
+                orderBy:{
+                    sortOrderId:"asc"
+                },
+                select:{
+                    id:true,
+                    name:true,
+                    slug:true,
+                    sortOrderId:true,
+                    active:true,
+                    cuisine:{
+                        select:{
+                            id:true,
+                            name:true,
+                            slug:true
+                        }
+                    }
+                }
+            })
+
+            return res.status(200).json(new apiResponse(200,categories,"shop categories fetched successfully"))
+    })
+
 // admin
     const reorderCategories = asyncHandler(async(req,res)=>{
             const {categoryIds,cuisineId,cuisineName} = req.body
@@ -261,8 +340,16 @@ const createCategory = asyncHandler(async(req,res)=>{
             const dataToUpdate = {}
 
             if(categoryName){
+                const categorySlug = categoryName.toUpperCase()
+                const ifCategory = await prisma.categories.findUnique({
+                    where:{
+                        slug:categorySlug
+                    }
+                })
+                if(ifCategory && ifCategory.id !== categoryId) throw new apiError(409,"category named the same already exists")
+
                 dataToUpdate.name = categoryName
-                dataToUpdate.slug = categoryName.toUpperCase()
+                dataToUpdate.slug = categorySlug
             }
 
             if(sortOrderId !== undefined || sortOrder !== undefined){
@@ -293,4 +380,4 @@ const createCategory = asyncHandler(async(req,res)=>{
             return res.status(200).json(new apiResponse(200,deletedCategory,"category deleted successfully"))
     })
     
-export { createCategory, mapCategories, fetchCategoryToCuisine, fetchAllCategories, fetchOnlyCategories, reorderCategories, editCategory, deleteCategory }
+export { createCategory, mapCategories, fetchCategoryToCuisine, fetchAllCategories, fetchOnlyCategories, fetchShopCategories, reorderCategories, editCategory, deleteCategory }

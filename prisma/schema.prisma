@@ -31,6 +31,7 @@ model User {
   orders          Order[]
   recharges       Recharges[]
   completedOffers BuyerCompletedOffer[]
+  targetedOffers  OfferBuyer[]
 
   profileImg String?
   buyerAdTargets BuyerAdTarget[]
@@ -77,6 +78,8 @@ model Shop {
   timings         ShopTiming[]
   completedOffers BuyerCompletedOffer[]
   targetedAds     AdSellerTarget[]
+  offers          Offer[]
+  revenueSummaries ShopRevenueSummary[]
 
   latitude  Float?
   longitude Float?
@@ -114,9 +117,16 @@ model Order {
   paymentMethod      PaymentMethod @default(CASH)
   paymentReceived    Boolean       @default(false)
   subtotalAmount     Int           @default(0)
+  discountAmount     Int           @default(0)
   deliveryAmount     Int           @default(0)
+  deliveryDiscountAmount Int        @default(0)
   totalAmount        Int           @default(0)
+  paidAmount         Int           @default(0)
+  refundAmount       Int           @default(0)
   customerNote       String?
+  completedAt        DateTime?
+  cancelledAt        DateTime?
+  refundedAt         DateTime?
 
   user           User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
   shop           Shop?                @relation(fields: [shopId], references: [id], onDelete: SetNull)
@@ -322,10 +332,8 @@ model ShopItem {
   shopId String
   itemId String
 
-  pricing            String
-  discount           Int?   @default(0)
-  discountPercentage Float? @default(0.0)
-  availableQuantity  Int?   @default(0)
+  pricing           String
+  availableQuantity Int?   @default(0)
 
   imageUrl    String?
   description String?
@@ -338,6 +346,7 @@ model ShopItem {
   comboItems ComboItem[]
   menuItems  MenuItem[]
   orderItems OrderItem[]
+  offerItems OfferItem[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
@@ -373,6 +382,7 @@ model Combo {
   menuCombos MenuCombo[]
   orderItems OrderItem[]
   tags       ComboTag[]
+  offerCombos OfferCombo[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
@@ -388,6 +398,7 @@ model Tag {
 
   itemTags  ItemTag[]
   comboTags ComboTag[]
+  offerAudienceTags OfferAudienceTag[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
@@ -448,6 +459,7 @@ model Menu {
   schedules MenuSchedule[]
   items     MenuItem[]
   combos    MenuCombo[]
+  offerMenus OfferMenu[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
@@ -507,6 +519,138 @@ model MenuCombo {
   updatedAt DateTime @default(now()) @updatedAt
 
   @@unique([menuId, comboId])
+}
+
+model Offer {
+  id          String    @id @default(uuid())
+  shopId      String
+  title       String
+  description String?
+  offerType   OfferType
+  active      Boolean   @default(true)
+  startsAt    DateTime
+  endsAt      DateTime
+
+  menuScope    OfferMenuScope    @default(ALL_MENUS)
+  applyTo      OfferApplyTo
+  audienceType OfferAudienceType @default(ALL_BUYERS)
+  stackingMode OfferStackingMode @default(EXCLUSIVE)
+
+  minQuantity       Int?
+  minOrderAmount    Int?
+  discountType      OfferDiscountType?
+  discountValue     Float?
+  maxDiscountAmount Int?
+  rewardQuantity    Int?
+  imageUrl          String?
+
+  shop     Shop                @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  menus    OfferMenu[]
+  items    OfferItem[]
+  combos   OfferCombo[]
+  buyers   OfferBuyer[]
+  tags     OfferAudienceTag[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@index([shopId, active, startsAt, endsAt])
+  @@index([audienceType])
+}
+
+model OfferMenu {
+  id      String @id @default(uuid())
+  offerId String
+  menuId  String
+
+  offer Offer @relation(fields: [offerId], references: [id], onDelete: Cascade)
+  menu  Menu  @relation(fields: [menuId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@unique([offerId, menuId])
+  @@index([menuId])
+}
+
+model OfferItem {
+  id         String             @id @default(uuid())
+  offerId    String
+  shopItemId String
+  role       OfferSelectionRole @default(APPLIES_TO)
+
+  offer   Offer    @relation(fields: [offerId], references: [id], onDelete: Cascade)
+  shopItem ShopItem @relation(fields: [shopItemId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@unique([offerId, shopItemId, role])
+  @@index([shopItemId])
+}
+
+model OfferCombo {
+  id      String             @id @default(uuid())
+  offerId String
+  comboId String
+  role    OfferSelectionRole @default(APPLIES_TO)
+
+  offer Offer @relation(fields: [offerId], references: [id], onDelete: Cascade)
+  combo Combo @relation(fields: [comboId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@unique([offerId, comboId, role])
+  @@index([comboId])
+}
+
+model OfferBuyer {
+  id      String @id @default(uuid())
+  offerId String
+  buyerId String
+
+  offer Offer @relation(fields: [offerId], references: [id], onDelete: Cascade)
+  buyer User  @relation(fields: [buyerId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@unique([offerId, buyerId])
+  @@index([buyerId])
+}
+
+model OfferAudienceTag {
+  id      String @id @default(uuid())
+  offerId String
+  tagId   String
+
+  offer Offer @relation(fields: [offerId], references: [id], onDelete: Cascade)
+  tag   Tag   @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@unique([offerId, tagId])
+  @@index([tagId])
+}
+
+model ShopRevenueSummary {
+  id               String            @id @default(uuid())
+  shopId           String
+  periodType       RevenuePeriodType
+  periodDate       DateTime
+
+  successfulOrders Int               @default(0)
+  cancelledOrders  Int               @default(0)
+  grossRevenue     Int               @default(0)
+  discountAmount   Int               @default(0)
+  deliveryRevenue  Int               @default(0)
+  refundAmount     Int               @default(0)
+  netRevenue       Int               @default(0)
+
+  shop Shop @relation(fields: [shopId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@unique([shopId, periodType, periodDate])
+  @@index([shopId, periodType, periodDate])
 }
 
 enum UserRole {
@@ -589,4 +733,55 @@ enum DayOfWeek {
   FRIDAY
   SATURDAY
   SUNDAY
+}
+
+enum OfferType {
+  BUY_X_GET_Y
+  PERCENT_DISCOUNT
+  FLAT_DISCOUNT
+  FREE_DELIVERY
+  COMBO_DISCOUNT
+}
+
+enum OfferMenuScope {
+  ALL_MENUS
+  SPECIFIC_MENUS
+}
+
+enum OfferApplyTo {
+  ALL_CART
+  SPECIFIC_ITEMS
+  SPECIFIC_COMBOS
+  ALL_ITEMS_IN_SELECTED_COMBOS
+}
+
+enum OfferAudienceType {
+  ALL_BUYERS
+  SPECIFIC_BUYERS
+  TAG_BASED
+  PREMIUM_CUSTOMERS
+  NEW_CUSTOMERS
+}
+
+enum OfferStackingMode {
+  EXCLUSIVE
+  STACKABLE
+}
+
+enum OfferDiscountType {
+  PERCENTAGE
+  FLAT
+  FREE
+}
+
+enum OfferSelectionRole {
+  APPLIES_TO
+  CUSTOMER_BUYS
+  CUSTOMER_GETS
+}
+
+enum RevenuePeriodType {
+  DAILY
+  MONTHLY
+  YEARLY
 }

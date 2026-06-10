@@ -7,10 +7,18 @@ const createCuisine = asyncHandler(async(req,res)=>{
     const {categoryName,sortOrder} = req.body
     if(!categoryName && !sortOrder) throw new apiError(400,"no category name passed")
     
+    const cuisineSlug = typeof categoryName==="string"?categoryName.toUpperCase():categoryName
+
+    const ifCuisine = await prisma.cuisine.findUnique({
+        where:{
+            slug:cuisineSlug
+        }
+    })
+    if (ifCuisine) throw new apiError(409,"cuisine named the same already exists")
     const cuisineCreate = await prisma.cuisine.create({
         data:{
             name:categoryName,
-            slug: typeof categoryName==="string"?categoryName.toUpperCase():categoryName,
+            slug:cuisineSlug,
             sortOrderId:sortOrder,
         }
     })
@@ -59,6 +67,76 @@ const fetchOnlyCuisines = asyncHandler(async(req,res)=>{
 
     if(!cuisines) throw new apiError(404,"cuisines not found")
     return res.status(200).json(new apiResponse(200,cuisines,"cuisines fetched successfully"))
+})
+
+// admin and seller
+const fetchShopCuisines = asyncHandler(async(req,res)=>{
+    const shopId = req.params.shopId || req.query.shopId
+
+    if(!shopId) throw new apiError(400,"shop id is required")
+
+    const currentUser = await prisma.user.findUnique({
+        where:{
+            id:req.userData?.id
+        },
+        select:{
+            id:true,
+            role:true,
+            isBlocked:true
+        }
+    })
+
+    if(!currentUser || currentUser.isBlocked) throw new apiError(401,"User blocked or unauthorized")
+
+    const shop = await prisma.shop.findUnique({
+        where:{
+            id:shopId
+        },
+        select:{
+            id:true,
+            shopName:true,
+            ownerId:true
+        }
+    })
+
+    if(!shop) throw new apiError(404,"shop not found")
+    if(currentUser.role !== "ADMIN" && shop.ownerId !== currentUser.id){
+        throw new apiError(403,"You can only fetch cuisines for your own shop")
+    }
+
+    const cuisines = await prisma.cuisine.findMany({
+        where:{
+            active:true,
+            categories:{
+                some:{
+                    active:true,
+                    allItems:{
+                        some:{
+                            active:true,
+                            shopItems:{
+                                some:{
+                                    shopId,
+                                    active:true
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        orderBy:{
+            sortOrderId:"asc"
+        },
+        select:{
+            id:true,
+            name:true,
+            slug:true,
+            sortOrderId:true,
+            active:true
+        }
+    })
+
+    return res.status(200).json(new apiResponse(200,cuisines,"shop cuisines fetched successfully"))
 })
 
 // admin
@@ -117,8 +195,16 @@ const editCuisine = asyncHandler(async(req,res)=>{
     const dataToUpdate = {}
 
     if(cuisineName){
+        const cuisineSlug = cuisineName.toUpperCase()
+        const ifCuisine = await prisma.cuisine.findUnique({
+            where:{
+                slug:cuisineSlug
+            }
+        })
+        if(ifCuisine && ifCuisine.id !== cuisineId) throw new apiError(409,"cuisine named the same already exists")
+
         dataToUpdate.name = cuisineName
-        dataToUpdate.slug = cuisineName.toUpperCase()
+        dataToUpdate.slug = cuisineSlug
     }
 
     if(sortOrderId !== undefined || sortOrder !== undefined){
@@ -150,4 +236,4 @@ const deleteCuisine = asyncHandler(async(req,res)=>{
     return res.status(200).json(new apiResponse(200,deletedCuisine,"cuisine deleted successfully"))
 })
 
-export { createCuisine, fetchAllCuisines, fetchOnlyCuisines, reorderCuisines, editCuisine, deleteCuisine }
+export { createCuisine, fetchAllCuisines, fetchOnlyCuisines, fetchShopCuisines, reorderCuisines, editCuisine, deleteCuisine }

@@ -219,4 +219,22 @@ const updateSellerProfile = asyncHandler(async (req, res) => {
         .json(new apiResponse(200, seller, "Seller profile updated successfully"));
 });
 
-export { createSeller, createSellerByAdmin, getSellerProfile, updateSellerProfile };
+const deleteSeller = asyncHandler(async (req, res) => {
+    const userId = req.userData?.id;
+
+    if (!userId) {
+        throw new apiError(401, "Unauthorized user");
+    }
+
+    await prisma.user.delete({
+        where: {
+            id: userId,
+        },
+    });
+
+    return res
+        .status(200)
+        .json(new apiResponse(200, null, "Seller deleted successfully"));
+});
+
+export { createSeller, createSellerByAdmin, getSellerProfile, updateSellerProfile, deleteSeller };

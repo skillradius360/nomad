@@ -144,7 +144,7 @@ function generateRandom(length = 4) {
 const createShop = asyncHandler(async(req,res)=>{
 
     const {shopName,description,
-        latitude, longitude,shopCategory,openingTime,closingTime,openDays,timings,shopOpenStatus}= req.body
+        latitude, longitude,shopCategory}= req.body
         const ownerId = req.userData?.id;
 
         if (!ownerId) {
@@ -166,85 +166,6 @@ const createShop = asyncHandler(async(req,res)=>{
         const createSlug = await shopName.charAt(0)+shopName.charAt(1)+generateRandom(4)
         if(!createSlug.length>5) throw new apiError(400,"slug creation error")
 
-        const timingPayload = Array.isArray(timings) && timings.length
-            ? timings
-            : Array.isArray(openDays) && openDays.length
-                ? openDays.map((day)=>({
-                    dayOfWeek:day,
-                    openingTime,
-                    closingTime
-                }))
-                : [];
-        const parsedTimings = [];
-        let defaultOpeningTime = null;
-        let defaultClosingTime = null;
-
-        for(const timing of timingPayload){
-            const dayOfWeek = String(timing.dayOfWeek || timing.day || "").trim().toUpperCase();
-            if(!validShopDays.includes(dayOfWeek)){
-                throw new apiError(400,`${dayOfWeek || "day"} is not a valid shop open day`);
-            }
-
-            const rawOpeningTime = String(timing.openingTime || timing.openTime || timing.startTime || "").trim().toLowerCase().replace(/\s+/g,"");
-            const rawClosingTime = String(timing.closingTime || timing.closeTime || timing.endTime || "").trim().toLowerCase().replace(/\s+/g,"");
-            const openingMatch = rawOpeningTime.match(/^(\d{1,2})(?::(\d{2}))?(am|pm)?$/);
-            const closingMatch = rawClosingTime.match(/^(\d{1,2})(?::(\d{2}))?(am|pm)?$/);
-
-            if(!openingMatch || !closingMatch){
-                throw new apiError(400,"openingTime and closingTime must be valid values like 09:00, 9:30am, 18:00");
-            }
-
-            let openingHour = Number(openingMatch[1]);
-            const openingMinute = openingMatch[2] === undefined ? 0 : Number(openingMatch[2]);
-            const openingMeridiem = openingMatch[3];
-            let closingHour = Number(closingMatch[1]);
-            const closingMinute = closingMatch[2] === undefined ? 0 : Number(closingMatch[2]);
-            const closingMeridiem = closingMatch[3];
-
-            if(openingMinute > 59 || closingMinute > 59){
-                throw new apiError(400,"time minute must be between 0 and 59");
-            }
-            if(openingMeridiem){
-                if(openingHour < 1 || openingHour > 12) throw new apiError(400,"openingTime hour is invalid");
-                if(openingMeridiem === "pm" && openingHour !== 12) openingHour += 12;
-                if(openingMeridiem === "am" && openingHour === 12) openingHour = 0;
-            }else if(openingHour < 0 || openingHour > 23){
-                throw new apiError(400,"openingTime hour is invalid");
-            }
-            if(closingMeridiem){
-                if(closingHour < 1 || closingHour > 12) throw new apiError(400,"closingTime hour is invalid");
-                if(closingMeridiem === "pm" && closingHour !== 12) closingHour += 12;
-                if(closingMeridiem === "am" && closingHour === 12) closingHour = 0;
-            }else if(closingHour < 0 || closingHour > 23){
-                throw new apiError(400,"closingTime hour is invalid");
-            }
-
-            parsedTimings.push({
-                dayOfWeek,
-                startMinute:(openingHour * 60) + openingMinute,
-                endMinute:(closingHour * 60) + closingMinute,
-                active:timing.active === undefined ? true : Boolean(timing.active)
-            });
-
-            if(!defaultOpeningTime){
-                defaultOpeningTime = new Date();
-                defaultOpeningTime.setHours(openingHour,openingMinute,0,0);
-                defaultClosingTime = new Date();
-                defaultClosingTime.setHours(closingHour,closingMinute,0,0);
-            }
-        }
-
-        const duplicateDay = parsedTimings.find((timing,index)=>parsedTimings.findIndex((current)=>current.dayOfWeek === timing.dayOfWeek) !== index);
-        if(duplicateDay){
-            throw new apiError(400,`${duplicateDay.dayOfWeek} timing is repeated`);
-        }
-
-        const shopStatus = shopOpenStatus ? parseShopStatus(shopOpenStatus) : "AUTOMATIC";
-
-        const holidays = parsedTimings.length
-            ? validShopDays.filter((day)=>!parsedTimings.some((timing)=>timing.dayOfWeek === day)).map((day)=>day.toLowerCase())
-            : undefined;
-
         const shopData = await prisma.shop.create({
             data: {
         shopName,
@@ -252,18 +173,15 @@ const createShop = asyncHandler(async(req,res)=>{
         shopImage:shopImage.url,
         Description:description,
         slug:createSlug,
-        OpeningTime:defaultOpeningTime,
-        ClosingTime:defaultClosingTime,
-        ShopOpenStatus:shopStatus,
-        status:shopStatus,
-        Holidays:holidays,
+        OpeningTime:null,
+        ClosingTime:null,
+        ShopOpenStatus:"CLOSED",
+        status:"CLOSED",
+        Holidays:validShopDays.map((day)=>day.toLowerCase()),
         Verified:req.currentUser?.role === "ADMIN",
         latitude: parseOptionalCoordinate(latitude, "latitude"),
         longitude: parseOptionalCoordinate(longitude, "longitude"),
-        shopCategory:shopCategory,
-        timings: parsedTimings.length ? {
-            create:parsedTimings
-        } : undefined
+        shopCategory:shopCategory
     },
     include:{
         timings:{
@@ -374,8 +292,6 @@ const findFullShopData = asyncHandler(async(req,res)=>{
                 select:{
                     id:true,
                     pricing:true,
-                    discount:true,
-                    discountPercentage:true,
                     availableQuantity:true,
                     imageUrl:true,
                     description:true,
@@ -385,22 +301,16 @@ const findFullShopData = asyncHandler(async(req,res)=>{
                         select:{
                             id:true,
                             name:true,
-                            description:true,
                             imageUrl:true,
                             sortOrderId:true,
                             active:true,
+                            categoryId:true,
                             category:{
                                 select:{
                                     id:true,
                                     name:true,
                                     slug:true,
-                                    cuisine:{
-                                        select:{
-                                            id:true,
-                                            name:true,
-                                            slug:true
-                                        }
-                                    }
+                                    cuisineId:true
                                 }
                             }
                         }
@@ -448,8 +358,6 @@ const findFullShopData = asyncHandler(async(req,res)=>{
                                 select:{
                                     id:true,
                                     pricing:true,
-                                    discount:true,
-                                    discountPercentage:true,
                                     imageUrl:true,
                                     description:true,
                                     item:{
@@ -457,13 +365,7 @@ const findFullShopData = asyncHandler(async(req,res)=>{
                                             id:true,
                                             name:true,
                                             imageUrl:true,
-                                            category:{
-                                                select:{
-                                                    id:true,
-                                                    name:true,
-                                                    slug:true
-                                                }
-                                            }
+                                            categoryId:true
                                         }
                                     }
                                 }
@@ -482,9 +384,7 @@ const findFullShopData = asyncHandler(async(req,res)=>{
         trial:buildTrialState(shopData),
         items:shopData.items.map((shopItem)=>{
             const itemPrice = Number(shopItem.pricing);
-            const itemDiscount = Number(shopItem.discount ?? 0);
-            const itemPercentageDiscount = Number(shopItem.discountPercentage ?? 0);
-            const finalPrice = Math.max(0,Math.round(itemPrice - itemDiscount - (itemPrice * itemPercentageDiscount / 100)));
+            const finalPrice = Math.max(0,Math.round(itemPrice));
 
             return {
                 ...shopItem,
@@ -496,9 +396,7 @@ const findFullShopData = asyncHandler(async(req,res)=>{
             finalPrice:combo.finalPrice ?? Math.max(0,Math.round(Number(combo.totalPrice) - Number(combo.discount ?? 0) - (Number(combo.totalPrice) * Number(combo.percentageDiscount ?? 0) / 100))),
             items:combo.items.map((comboItem)=>{
                 const itemPrice = Number(comboItem.item.pricing);
-                const itemDiscount = Number(comboItem.item.discount ?? 0);
-                const itemPercentageDiscount = Number(comboItem.item.discountPercentage ?? 0);
-                const finalPrice = Math.max(0,Math.round(itemPrice - itemDiscount - (itemPrice * itemPercentageDiscount / 100)));
+                const finalPrice = Math.max(0,Math.round(itemPrice));
 
                 return {
                     ...comboItem,
@@ -1256,8 +1154,6 @@ const findByShopSlug = asyncHandler(async(req,res)=>{
                 select:{
                     id:true,
                     pricing:true,
-                    discount:true,
-                    discountPercentage:true,
                     availableQuantity:true,
                     imageUrl:true,
                     description:true,
@@ -1267,22 +1163,16 @@ const findByShopSlug = asyncHandler(async(req,res)=>{
                         select:{
                             id:true,
                             name:true,
-                            description:true,
                             imageUrl:true,
                             sortOrderId:true,
                             active:true,
+                            categoryId:true,
                             category:{
                                 select:{
                                     id:true,
                                     name:true,
                                     slug:true,
-                                    cuisine:{
-                                        select:{
-                                            id:true,
-                                            name:true,
-                                            slug:true
-                                        }
-                                    }
+                                    cuisineId:true
                                 }
                             }
                         }
@@ -1330,8 +1220,6 @@ const findByShopSlug = asyncHandler(async(req,res)=>{
                                 select:{
                                     id:true,
                                     pricing:true,
-                                    discount:true,
-                                    discountPercentage:true,
                                     imageUrl:true,
                                     description:true,
                                     item:{
@@ -1339,13 +1227,7 @@ const findByShopSlug = asyncHandler(async(req,res)=>{
                                             id:true,
                                             name:true,
                                             imageUrl:true,
-                                            category:{
-                                                select:{
-                                                    id:true,
-                                                    name:true,
-                                                    slug:true
-                                                }
-                                            }
+                                            categoryId:true
                                         }
                                     }
                                 }
