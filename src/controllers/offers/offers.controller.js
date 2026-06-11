@@ -28,7 +28,6 @@ const offerInclude = {
             id:true,
             shopItemId:true,
             role:true,
-            quantity:true,
             shopItem:{
                 select:{
                     id:true,
@@ -50,7 +49,6 @@ const offerInclude = {
             id:true,
             comboId:true,
             role:true,
-            quantity:true,
             combo:{
                 select:{
                     id:true,
@@ -89,6 +87,23 @@ const offerInclude = {
             }
         }
     }
+};
+
+const isTruthyInput = (value)=> value === true || String(value).toLowerCase() === "true";
+
+const getFirstOrderDiscountFields = (body)=>{
+    const firstOrderDiscountValue = body.firstOrderDiscountValue ?? body.firstPurchaseDiscountValue ?? body.firstTimeBuyerDiscountValue;
+    const firstOrderDiscountType = body.firstOrderDiscountType ?? body.firstPurchaseDiscountType ?? body.firstTimeBuyerDiscountType ?? body.discountType ?? "PERCENTAGE";
+    const firstOrderOnly = body.firstOrderOnly ?? body.firstPurchaseOnly ?? body.firstTimeBuyerOnly;
+    const enabled = isTruthyInput(firstOrderOnly) || firstOrderDiscountValue !== undefined;
+    const normalizedDiscountType = String(firstOrderDiscountType).toUpperCase();
+
+    return {
+        enabled,
+        discountValue:firstOrderDiscountValue,
+        discountType:normalizedDiscountType,
+        offerType:normalizedDiscountType === "FLAT" ? "FLAT_DISCOUNT" : "PERCENT_DISCOUNT"
+    };
 };
 
 const createOffer = asyncHandler(async(req,res)=>{
@@ -139,13 +154,27 @@ const createOffer = asyncHandler(async(req,res)=>{
 
     if(!shopId) throw new apiError(400,"shopId is required");
     if(!title) throw new apiError(400,"title is required");
-    if(!offerType) throw new apiError(400,"offerType is required");
-    if(!applyTo) throw new apiError(400,"applyTo is required");
     if(!startsAt || !endsAt) throw new apiError(400,"startsAt and endsAt are required");
 
-    const normalizedOfferType = String(offerType).toUpperCase();
+    const firstOrderDiscount = getFirstOrderDiscountFields(req.body);
+    const offerTypeInput = firstOrderDiscount.enabled ? firstOrderDiscount.offerType : offerType;
+    const applyToInput = firstOrderDiscount.enabled ? (applyTo || "ALL_CART") : applyTo;
+    const audienceTypeInput = firstOrderDiscount.enabled ? "NEW_CUSTOMERS" : audienceType;
+    const discountTypeInput = firstOrderDiscount.enabled ? firstOrderDiscount.discountType : discountType;
+    const discountValueInput = firstOrderDiscount.enabled ? (firstOrderDiscount.discountValue ?? discountValue) : discountValue;
+
+    if(!offerTypeInput) throw new apiError(400,"offerType is required");
+    if(!applyToInput) throw new apiError(400,"applyTo is required");
+    if(firstOrderDiscount.enabled && (discountValueInput === undefined || discountValueInput === null || discountValueInput === "")){
+        throw new apiError(400,"first order discount value is required");
+    }
+    if(firstOrderDiscount.enabled && !["PERCENTAGE","FLAT"].includes(firstOrderDiscount.discountType)){
+        throw new apiError(400,"first order discountType must be PERCENTAGE or FLAT");
+    }
+
+    const normalizedOfferType = String(offerTypeInput).toUpperCase();
     const normalizedMenuScope = menuScope ? String(menuScope).toUpperCase() : "ALL_MENUS";
-    const requestedApplyTo = String(applyTo).toUpperCase();
+    const requestedApplyTo = String(applyToInput).toUpperCase();
     const normalizedApplyTo = ["ALL_CART","ALL_ITEMS","ALL_ORDER","CART"].includes(requestedApplyTo)
         ? "ALL_CART"
         : requestedApplyTo === "ITEMS"
@@ -153,9 +182,9 @@ const createOffer = asyncHandler(async(req,res)=>{
             : requestedApplyTo === "COMBOS"
                 ? "SPECIFIC_COMBOS"
                 : requestedApplyTo;
-    const normalizedAudienceType = audienceType ? String(audienceType).toUpperCase() : "ALL_BUYERS";
+    const normalizedAudienceType = audienceTypeInput ? String(audienceTypeInput).toUpperCase() : "ALL_BUYERS";
     const normalizedStackingMode = stackingMode ? String(stackingMode).toUpperCase() : "EXCLUSIVE";
-    const normalizedDiscountType = discountType ? String(discountType).toUpperCase() : undefined;
+    const normalizedDiscountType = discountTypeInput ? String(discountTypeInput).toUpperCase() : undefined;
 
     if(!["BUY_X_GET_Y","PERCENT_DISCOUNT","FLAT_DISCOUNT","FREE_DELIVERY","COMBO_DISCOUNT"].includes(normalizedOfferType)){
         throw new apiError(400,"invalid offerType");
@@ -321,7 +350,7 @@ const createOffer = asyncHandler(async(req,res)=>{
             minQuantity:minQuantity === undefined || minQuantity === null || minQuantity === "" ? undefined : Number(minQuantity),
             minOrderAmount:minOrderAmount === undefined || minOrderAmount === null || minOrderAmount === "" ? undefined : Number(minOrderAmount),
             discountType:normalizedDiscountType,
-            discountValue:discountValue === undefined || discountValue === null || discountValue === "" ? undefined : Number(discountValue),
+            discountValue:discountValueInput === undefined || discountValueInput === null || discountValueInput === "" ? undefined : Number(discountValueInput),
             maxDiscountAmount:maxDiscountAmount === undefined || maxDiscountAmount === null || maxDiscountAmount === "" ? undefined : Number(maxDiscountAmount),
             rewardQuantity:rewardQuantity === undefined || rewardQuantity === null || rewardQuantity === "" ? undefined : Number(rewardQuantity),
             imageUrl:uploadedImageUrl || imageUrl || undefined,
@@ -491,10 +520,27 @@ const updateOffer = asyncHandler(async(req,res)=>{
         imageUrl
     } = req.body;
 
+    const firstOrderDiscount = getFirstOrderDiscountFields(req.body);
+    const firstOrderDiscountValueInput = firstOrderDiscount.discountValue ?? discountValue;
+    if(firstOrderDiscount.enabled){
+        if(firstOrderDiscount.discountType && !["PERCENTAGE","FLAT"].includes(firstOrderDiscount.discountType)){
+            throw new apiError(400,"first order discountType must be PERCENTAGE or FLAT");
+        }
+
+        dataToUpdate.audienceType = "NEW_CUSTOMERS";
+        dataToUpdate.applyTo = "ALL_CART";
+        dataToUpdate.discountType = firstOrderDiscount.discountType;
+        dataToUpdate.offerType = firstOrderDiscount.offerType;
+
+        if(firstOrderDiscountValueInput !== undefined){
+            dataToUpdate.discountValue = firstOrderDiscountValueInput === null || firstOrderDiscountValueInput === "" ? null : Number(firstOrderDiscountValueInput);
+        }
+    }
+
     if(title !== undefined) dataToUpdate.title = title;
     if(description !== undefined) dataToUpdate.description = description;
     if(active !== undefined || isActive !== undefined) dataToUpdate.active = active === true || isActive === true || String(active ?? isActive).toLowerCase() === "true";
-    if(offerType !== undefined){
+    if(offerType !== undefined && !firstOrderDiscount.enabled){
         const normalizedOfferType = String(offerType).toUpperCase();
         if(!["BUY_X_GET_Y","PERCENT_DISCOUNT","FLAT_DISCOUNT","FREE_DELIVERY","COMBO_DISCOUNT"].includes(normalizedOfferType)) throw new apiError(400,"invalid offerType");
         dataToUpdate.offerType = normalizedOfferType;
@@ -504,7 +550,7 @@ const updateOffer = asyncHandler(async(req,res)=>{
         if(!["ALL_MENUS","SPECIFIC_MENUS"].includes(normalizedMenuScope)) throw new apiError(400,"invalid menuScope");
         dataToUpdate.menuScope = normalizedMenuScope;
     }
-    if(applyTo !== undefined){
+    if(applyTo !== undefined && !firstOrderDiscount.enabled){
         const requestedApplyTo = String(applyTo).toUpperCase();
         const normalizedApplyTo = ["ALL_CART","ALL_ITEMS","ALL_ORDER","CART"].includes(requestedApplyTo)
             ? "ALL_CART"
@@ -516,7 +562,7 @@ const updateOffer = asyncHandler(async(req,res)=>{
         if(!["ALL_CART","SPECIFIC_ITEMS","SPECIFIC_COMBOS","ALL_ITEMS_IN_SELECTED_COMBOS"].includes(normalizedApplyTo)) throw new apiError(400,"invalid applyTo");
         dataToUpdate.applyTo = normalizedApplyTo;
     }
-    if(audienceType !== undefined){
+    if(audienceType !== undefined && !firstOrderDiscount.enabled){
         const normalizedAudienceType = String(audienceType).toUpperCase();
         if(!["ALL_BUYERS","SPECIFIC_BUYERS","TAG_BASED","PREMIUM_CUSTOMERS","NEW_CUSTOMERS"].includes(normalizedAudienceType)) throw new apiError(400,"invalid audienceType");
         dataToUpdate.audienceType = normalizedAudienceType;
@@ -526,7 +572,7 @@ const updateOffer = asyncHandler(async(req,res)=>{
         if(!["EXCLUSIVE","STACKABLE"].includes(normalizedStackingMode)) throw new apiError(400,"invalid stackingMode");
         dataToUpdate.stackingMode = normalizedStackingMode;
     }
-    if(discountType !== undefined){
+    if(discountType !== undefined && !firstOrderDiscount.enabled){
         const normalizedDiscountType = discountType ? String(discountType).toUpperCase() : null;
         if(normalizedDiscountType && !["PERCENTAGE","FLAT","FREE"].includes(normalizedDiscountType)) throw new apiError(400,"invalid discountType");
         dataToUpdate.discountType = normalizedDiscountType;
@@ -547,7 +593,7 @@ const updateOffer = asyncHandler(async(req,res)=>{
 
     if(minQuantity !== undefined) dataToUpdate.minQuantity = minQuantity === null || minQuantity === "" ? null : Number(minQuantity);
     if(minOrderAmount !== undefined) dataToUpdate.minOrderAmount = minOrderAmount === null || minOrderAmount === "" ? null : Number(minOrderAmount);
-    if(discountValue !== undefined) dataToUpdate.discountValue = discountValue === null || discountValue === "" ? null : Number(discountValue);
+    if(discountValue !== undefined && !firstOrderDiscount.enabled) dataToUpdate.discountValue = discountValue === null || discountValue === "" ? null : Number(discountValue);
     if(maxDiscountAmount !== undefined) dataToUpdate.maxDiscountAmount = maxDiscountAmount === null || maxDiscountAmount === "" ? null : Number(maxDiscountAmount);
     if(rewardQuantity !== undefined) dataToUpdate.rewardQuantity = rewardQuantity === null || rewardQuantity === "" ? null : Number(rewardQuantity);
     if(imageUrl !== undefined) dataToUpdate.imageUrl = imageUrl;

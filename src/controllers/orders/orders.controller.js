@@ -691,7 +691,38 @@ const getMyOrders = asyncHandler(async(req,res)=>{
         }
     });
 
-    return res.status(200).json(new apiResponse(200,orders,"orders fetched successfully"));
+    const formattedOrders = orders.map((order)=>({
+        id:order.id,
+        shopId:order.shopId,
+        shopName:order.shop?.shopName || null,
+        currentOrderStatus:order.currentOrderStatus,
+        paymentMethod:order.paymentMethod,
+        paymentReceived:order.paymentReceived,
+        subtotalAmount:order.subtotalAmount,
+        discountAmount:order.discountAmount,
+        deliveryAmount:order.deliveryAmount,
+        deliveryDiscountAmount:order.deliveryDiscountAmount,
+        totalAmount:order.totalAmount,
+        paidAmount:order.paidAmount,
+        refundAmount:order.refundAmount,
+        customerNote:order.customerNote,
+        completedAt:order.completedAt,
+        cancelledAt:order.cancelledAt,
+        refundedAt:order.refundedAt,
+        createdAt:order.createdAt,
+        updatedAt:order.updatedAt,
+        items:order.orderItems.map((item)=>({
+            id:item.id,
+            type:item.orderItemType,
+            itemId:item.shopItemId || item.comboId,
+            name:item.name,
+            quantity:item.quantity,
+            price:item.priceAtOrderTime,
+            totalPrice:item.totalPrice
+        }))
+    }));
+
+    return res.status(200).json(new apiResponse(200,formattedOrders,"orders fetched successfully"));
 });
 
 const getSellerOrders = asyncHandler(async(req,res)=>{
@@ -810,6 +841,88 @@ const getSellerProcessedOrders = asyncHandler(async(req,res)=>{
     });
 
     return res.status(200).json(new apiResponse(200,orders,"seller processed orders fetched successfully"));
+});
+
+const getOrderCurrentStatus = asyncHandler(async(req,res)=>{
+    const { orderId } = req.params;
+
+    if(!orderId) throw new apiError(400,"order id is required");
+
+    const currentUser = await prisma.user.findUnique({
+        where:{
+            id:req.userData?.id
+        },
+        select:{
+            id:true,
+            role:true,
+            isBlocked:true
+        }
+    });
+
+    if(!currentUser || currentUser.isBlocked) throw new apiError(401,"User blocked or unauthorized");
+
+    const order = await prisma.order.findUnique({
+        where:{
+            id:orderId
+        },
+        select:{
+            id:true,
+            userId:true,
+            currentOrderStatus:true,
+            paymentMethod:true,
+            paymentReceived:true,
+            totalAmount:true,
+            paidAmount:true,
+            refundAmount:true,
+            createdAt:true,
+            updatedAt:true,
+            completedAt:true,
+            cancelledAt:true,
+            refundedAt:true,
+            shop:{
+                select:{
+                    id:true,
+                    shopName:true,
+                    ownerId:true
+                }
+            }
+        }
+    });
+
+    if(!order) throw new apiError(404,"order not found");
+
+    const canViewOrder =
+        currentUser.role === "ADMIN" ||
+        order.userId === currentUser.id ||
+        order.shop?.ownerId === currentUser.id;
+
+    if(!canViewOrder) throw new apiError(403,"You cannot view this order");
+
+    const normalFlow = ["NEW","PAYMENT_DONE","PREPARING","READY","DONE"];
+    const currentStatusIndex = normalFlow.indexOf(order.currentOrderStatus);
+    const completed = [];
+
+    if(order.currentOrderStatus === "CANCELLED"){
+        completed.push("NEW");
+        if(order.paymentReceived) completed.push("PAYMENT_DONE");
+        completed.push("CANCELLED");
+    }else{
+        normalFlow.forEach((status,index)=>{
+            if(status === "PAYMENT_DONE"){
+                if(order.paymentReceived) completed.push(status);
+                return;
+            }
+
+            if(currentStatusIndex !== -1 && index < currentStatusIndex){
+                completed.push(status);
+            }
+        });
+    }
+
+    return res.status(200).json(new apiResponse(200,{
+        completed,
+        currentStatus:order.currentOrderStatus
+    },"order current status fetched successfully"));
 });
 
 const getAllProcessedOrders = asyncHandler(async(req,res)=>{
@@ -1454,6 +1567,7 @@ export {
     getMyOrders,
     getSellerOrders,
     getSellerProcessedOrders,
+    getOrderCurrentStatus,
     getAllProcessedOrders,
     markPaymentReceived,
     confirmOrder,

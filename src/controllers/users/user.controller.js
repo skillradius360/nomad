@@ -1,6 +1,7 @@
 import { prisma } from "../../db/index.js";
 import { apiError, apiResponse, asyncHandler } from "../../utils/handler.js";
 import { cloudUploader } from "../../utils/cloudinary.upload.js";
+import { threadCpuUsage } from "process";
 
 const userEditableFields = [
     "email",
@@ -20,6 +21,14 @@ const adminEditableFields = [
 
 const userRoles = ["SUPER", "BUYER", "SELLER", "ADMIN"];
 const selfAssignableRoles = ["BUYER", "SELLER"];
+
+const normalizeRole = (role) => typeof role === "string" ? role.toUpperCase() : role;
+
+const getPaginationSkip = (req) => {
+    const skip = Number(req.query.skip || 0);
+    if(Number.isNaN(skip) || skip < 0) throw new apiError(400,"Invalid skip value");
+    return skip;
+};
 
 // admin
 const fetchAllUsers = asyncHandler(async (req, res) => {
@@ -65,12 +74,25 @@ const deleteUser = asyncHandler(async (req, res) => {
         throw new apiError(400, "Invalid user id");
     }
 
-    await prisma.user.delete({
+    const existingUser = await prisma.user.findUnique({
+        where: {
+            id,
+        },
+        select: {
+            id: true,
+        },
+    });
+
+    if (!existingUser) {
+        throw new apiError(404, "User not found");
+    }
+
+    const isDeleted = await prisma.user.delete({
         where: {
             id,
         },
     });
-
+if(!isDeleted) throw new apiError(400,"user deletion error")
     return res
         .status(200)
         .json(new apiResponse(200, null, "User deleted successfully"));
@@ -95,16 +117,22 @@ const editUserData = asyncHandler(async (req, res) => {
         }
     });
 
+    if (updateData.role !== undefined) {
+        updateData.role = normalizeRole(updateData.role);
+    }
+
     if (!isAdminUser && req.body.role !== undefined) {
-        if (req.body.role === "ADMIN") {
+        const requestedRole = normalizeRole(req.body.role);
+
+        if (requestedRole === "ADMIN" || requestedRole === "SUPER") {
             throw new apiError(403, "Only admins can assign admin role");
         }
 
-        if (!selfAssignableRoles.includes(req.body.role)) {
+        if (!selfAssignableRoles.includes(requestedRole)) {
             throw new apiError(400, "Invalid user role");
         }
 
-        updateData.role = req.body.role;
+        updateData.role = requestedRole;
     }
 
     if (updateData.role !== undefined && !userRoles.includes(updateData.role)) {
@@ -113,6 +141,19 @@ const editUserData = asyncHandler(async (req, res) => {
 
     if (!Object.keys(updateData).length) {
         throw new apiError(400, "No valid user fields received");
+    }
+
+    const existingUser = await prisma.user.findUnique({
+        where: {
+            id,
+        },
+        select: {
+            id: true,
+        },
+    });
+
+    if (!existingUser) {
+        throw new apiError(404, "User not found");
     }
 
     const user = await prisma.user.update({
@@ -198,6 +239,19 @@ const SuspendUser = asyncHandler(async (req, res) => {
         throw new apiError(400, "Invalid user id");
     }
 
+    const existingUser = await prisma.user.findUnique({
+        where: {
+            id,
+        },
+        select: {
+            id: true,
+        },
+    });
+
+    if (!existingUser) {
+        throw new apiError(404, "User not found");
+    }
+
     const user = await prisma.user.update({
         where: {
             id,
@@ -213,28 +267,30 @@ const SuspendUser = asyncHandler(async (req, res) => {
 });
 // admin
 const fetchAllSellers = asyncHandler(async(req,res)=>{
-    const {skip} = req.body
+    const skip = getPaginationSkip(req);
+
     const allData = await prisma.user.findMany({
         where:{
             role:"SELLER"
         },
-        skip:Number(skip),
+        skip,
         take:10,
         orderBy:{
             createdAt:"asc"
         }
     })
-    if(!allData) throw new apiError(400,"buyers fetching failed")
+    if(!allData) throw new apiError(400,"sellers fetching failed")
     return res.json(new apiResponse(200,allData,"All sellers fetched"))
 })
 // admin
 const fetchAllBuyers= asyncHandler(async(req,res)=>{
-    const {skip} = req.body
+    const skip = getPaginationSkip(req);
+
     const allData = await prisma.user.findMany({
         where:{
             role:"BUYER"
         },
-        skip:Number(skip),
+        skip,
         take:10,
         orderBy:{
             createdAt:"asc"

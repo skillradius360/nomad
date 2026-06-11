@@ -5,6 +5,7 @@ import {
     createOrder,
     getAllProcessedOrders,
     getMyOrders,
+    getOrderCurrentStatus,
     getSellerOrders,
     getSellerProcessedOrders,
     markPaymentReceived,
@@ -26,6 +27,7 @@ orderRouter.route("/seller/processed").get(getSellerProcessedOrders);
 
 orderRouter.route("/processed/all").get(getAllProcessedOrders);
 
+orderRouter.route("/:orderId/status").get(getOrderCurrentStatus);
 orderRouter.route("/:orderId/payment-received").patch(markPaymentReceived);
 orderRouter.route("/:orderId/confirm").patch(confirmOrder);
 orderRouter.route("/:orderId/ready").patch(markOrderReady);
