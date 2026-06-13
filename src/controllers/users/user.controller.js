@@ -30,6 +30,20 @@ const getPaginationSkip = (req) => {
     return skip;
 };
 
+const getOverviewTake = (req) => {
+    const take = Number(req.query.take || 10);
+    if(!Number.isInteger(take) || take < 1) throw new apiError(400,"Invalid take value");
+    return Math.min(take,50);
+};
+
+const countByField = (rows, field) => {
+    return rows.reduce((result,row)=>{
+        const key = row[field] || "UNKNOWN";
+        result[key] = row._count?._all || 0;
+        return result;
+    },{});
+};
+
 // admin
 const fetchAllUsers = asyncHandler(async (req, res) => {
     const users = await prisma.user.findMany({
@@ -41,6 +55,445 @@ const fetchAllUsers = asyncHandler(async (req, res) => {
     return res
         .status(200)
         .json(new apiResponse(200, users, "Users fetched successfully"));
+});
+
+const fetchAllUserOverviewData = asyncHandler(async(req,res)=>{
+    const take = getOverviewTake(req);
+    const now = new Date();
+    const todayStart = new Date(now);
+    todayStart.setHours(0,0,0,0);
+
+    const nextSevenDays = new Date(now);
+    nextSevenDays.setDate(nextSevenDays.getDate() + 7);
+
+    const [
+        userRoleCounts,
+        totalUsers,
+        blockedUsers,
+        verifiedUsers,
+        totalShops,
+        verifiedShops,
+        liveShops,
+        lowBalanceShops,
+        shopBillingCounts,
+        trialsEndingSoon,
+        orderStatusCounts,
+        ordersToday,
+        completedOrderTotals,
+        pendingBilling,
+        rechargeStatusCounts,
+        approvedRechargeTotals,
+        activeOffers,
+        activeAds,
+        activeBuyerAds,
+        activeBanners,
+        dataCounts,
+        recentUsers,
+        recentShops,
+        recentOrders,
+        recentRecharges,
+        recentOffers,
+        recentAds,
+        recentBuyerAds,
+        recentBanners,
+        recentRevenueSummaries
+    ] = await Promise.all([
+        prisma.user.groupBy({
+            by:["role"],
+            _count:{
+                _all:true
+            }
+        }),
+        prisma.user.count(),
+        prisma.user.count({
+            where:{
+                isBlocked:true
+            }
+        }),
+        prisma.user.count({
+            where:{
+                isVerified:true
+            }
+        }),
+        prisma.shop.count(),
+        prisma.shop.count({
+            where:{
+                Verified:true
+            }
+        }),
+        prisma.shop.count({
+            where:{
+                ShopOpenStatus:"OPEN"
+            }
+        }),
+        prisma.shop.count({
+            where:{
+                shopBalance:{
+                    lte:0
+                }
+            }
+        }),
+        prisma.shop.groupBy({
+            by:["billingStatus"],
+            _count:{
+                _all:true
+            }
+        }),
+        prisma.shop.count({
+            where:{
+                billingStatus:"TRIAL",
+                trialEndsAt:{
+                    gte:now,
+                    lte:nextSevenDays
+                }
+            }
+        }),
+        prisma.order.groupBy({
+            by:["currentOrderStatus"],
+            _count:{
+                _all:true
+            }
+        }),
+        prisma.order.count({
+            where:{
+                createdAt:{
+                    gte:todayStart
+                }
+            }
+        }),
+        prisma.order.aggregate({
+            where:{
+                currentOrderStatus:"DONE"
+            },
+            _count:{
+                id:true
+            },
+            _sum:{
+                totalAmount:true,
+                paidAmount:true,
+                refundAmount:true,
+                discountAmount:true,
+                deliveryAmount:true,
+                deliveryDiscountAmount:true
+            }
+        }),
+        prisma.recharges.count({
+            where:{
+                status:"PENDING"
+            }
+        }),
+        prisma.recharges.groupBy({
+            by:["status"],
+            _count:{
+                _all:true
+            },
+            _sum:{
+                orderAmount:true
+            }
+        }),
+        prisma.recharges.aggregate({
+            where:{
+                status:"APPROVED"
+            },
+            _count:{
+                id:true
+            },
+            _sum:{
+                orderAmount:true
+            }
+        }),
+        prisma.offer.count({
+            where:{
+                active:true,
+                startsAt:{
+                    lte:now
+                },
+                endsAt:{
+                    gte:now
+                }
+            }
+        }),
+        prisma.ad.count({
+            where:{
+                active:true,
+                startsAt:{
+                    lte:now
+                },
+                endsAt:{
+                    gte:now
+                }
+            }
+        }),
+        prisma.buyerAds.count({
+            where:{
+                active:true,
+                startsAt:{
+                    lte:now
+                },
+                endsAt:{
+                    gte:now
+                }
+            }
+        }),
+        prisma.banner.count({
+            where:{
+                active:true
+            }
+        }),
+        Promise.all([
+            prisma.cuisine.count(),
+            prisma.categories.count(),
+            prisma.items.count(),
+            prisma.shopItem.count(),
+            prisma.combo.count(),
+            prisma.menu.count(),
+            prisma.tag.count(),
+            prisma.orderItem.count(),
+            prisma.shopRevenueSummary.count()
+        ]),
+        prisma.user.findMany({
+            take,
+            orderBy:{
+                createdAt:"desc"
+            },
+            select:{
+                id:true,
+                name:true,
+                email:true,
+                phone:true,
+                role:true,
+                profileImg:true,
+                billingPlan:true,
+                isVerified:true,
+                isBlocked:true,
+                createdAt:true,
+                updatedAt:true
+            }
+        }),
+        prisma.shop.findMany({
+            take,
+            orderBy:{
+                createdAt:"desc"
+            },
+            include:{
+                owner:{
+                    select:{
+                        id:true,
+                        name:true,
+                        phone:true,
+                        email:true
+                    }
+                }
+            }
+        }),
+        prisma.order.findMany({
+            take,
+            orderBy:{
+                createdAt:"desc"
+            },
+            include:{
+                user:{
+                    select:{
+                        id:true,
+                        name:true,
+                        phone:true
+                    }
+                },
+                shop:{
+                    select:{
+                        id:true,
+                        shopName:true,
+                        ownerId:true
+                    }
+                },
+                orderItems:true
+            }
+        }),
+        prisma.recharges.findMany({
+            take,
+            orderBy:{
+                createdAt:"desc"
+            },
+            include:{
+                user:{
+                    select:{
+                        id:true,
+                        name:true,
+                        phone:true
+                    }
+                },
+                shop:{
+                    select:{
+                        id:true,
+                        shopName:true
+                    }
+                }
+            }
+        }),
+        prisma.offer.findMany({
+            take,
+            orderBy:{
+                createdAt:"desc"
+            },
+            include:{
+                shop:{
+                    select:{
+                        id:true,
+                        shopName:true
+                    }
+                }
+            }
+        }),
+        prisma.ad.findMany({
+            take,
+            orderBy:{
+                createdAt:"desc"
+            },
+            include:{
+                sellerTargets:true
+            }
+        }),
+        prisma.buyerAds.findMany({
+            take,
+            orderBy:{
+                createdAt:"desc"
+            },
+            include:{
+                buyerTargets:true
+            }
+        }),
+        prisma.banner.findMany({
+            take,
+            orderBy:{
+                createdAt:"desc"
+            },
+            include:{
+                shop:{
+                    select:{
+                        id:true,
+                        shopName:true
+                    }
+                },
+                createdBy:{
+                    select:{
+                        id:true,
+                        name:true,
+                        role:true
+                    }
+                }
+            }
+        }),
+        prisma.shopRevenueSummary.findMany({
+            take,
+            orderBy:{
+                periodDate:"desc"
+            },
+            include:{
+                shop:{
+                    select:{
+                        id:true,
+                        shopName:true
+                    }
+                }
+            }
+        })
+    ]);
+
+    const [
+        cuisines,
+        categories,
+        masterItems,
+        shopItems,
+        combos,
+        menus,
+        tags,
+        orderItems,
+        revenueSummaries
+    ] = dataCounts;
+
+    const totalGmv = completedOrderTotals._sum.totalAmount || 0;
+    const totalPaidAmount = completedOrderTotals._sum.paidAmount || 0;
+    const totalRefundAmount = completedOrderTotals._sum.refundAmount || 0;
+
+    const overview = {
+        generatedAt:now,
+        take,
+        metrics:{
+            users:{
+                total:totalUsers,
+                byRole:countByField(userRoleCounts,"role"),
+                blocked:blockedUsers,
+                verified:verifiedUsers
+            },
+            shops:{
+                total:totalShops,
+                verified:verifiedShops,
+                live:liveShops,
+                lowBalance:lowBalanceShops,
+                billingStatus:countByField(shopBillingCounts,"billingStatus"),
+                trialsEndingInSevenDays:trialsEndingSoon
+            },
+            orders:{
+                totalByStatus:countByField(orderStatusCounts,"currentOrderStatus"),
+                today:ordersToday,
+                completed:completedOrderTotals._count.id || 0,
+                totalGmv,
+                totalPaidAmount,
+                totalRefundAmount,
+                totalNetAmount:totalPaidAmount - totalRefundAmount,
+                totalDiscountAmount:(completedOrderTotals._sum.discountAmount || 0) + (completedOrderTotals._sum.deliveryDiscountAmount || 0),
+                totalDeliveryAmount:completedOrderTotals._sum.deliveryAmount || 0
+            },
+            billing:{
+                pendingRecharges:pendingBilling,
+                approvedPackages:approvedRechargeTotals._count.id || 0,
+                approvedRechargeAmount:approvedRechargeTotals._sum.orderAmount || 0,
+                rechargeStatus:rechargeStatusCounts.reduce((result,row)=>{
+                    result[row.status] = {
+                        count:row._count?._all || 0,
+                        amount:row._sum?.orderAmount || 0
+                    };
+                    return result;
+                },{})
+            },
+            marketing:{
+                activeOffers,
+                activeSellerAds:activeAds,
+                activeBuyerAds,
+                activeBanners
+            },
+            catalog:{
+                cuisines,
+                categories,
+                masterItems,
+                shopItems,
+                combos,
+                menus,
+                tags,
+                orderItems,
+                revenueSummaries
+            }
+        },
+        recent:{
+            users:recentUsers,
+            shops:recentShops,
+            orders:recentOrders,
+            recharges:recentRecharges,
+            offers:recentOffers,
+            sellerAds:recentAds,
+            buyerAds:recentBuyerAds,
+            banners:recentBanners,
+            revenueSummaries:recentRevenueSummaries
+        },
+        unavailable:{
+            activeChats:"No chat model found in current Prisma schema",
+            notificationsSent:"No notification model found in current Prisma schema",
+            activeSlotsPeak:"No slot package model found in current Prisma schema",
+            orderCommission:"No commission field or model found in current Prisma schema"
+        }
+    };
+
+    return res.status(200).json(new apiResponse(200,overview,"User overview data fetched successfully"));
 });
 
 
@@ -302,4 +755,4 @@ const fetchAllBuyers= asyncHandler(async(req,res)=>{
 })
 
 
-export { fetchAllUsers, fetchUserProfile, deleteUser, editUserData, editOwnUserData, SuspendUser ,fetchAllSellers,fetchAllBuyers};
+export { fetchAllUsers, fetchAllUserOverviewData, fetchUserProfile, deleteUser, editUserData, editOwnUserData, SuspendUser ,fetchAllSellers,fetchAllBuyers};

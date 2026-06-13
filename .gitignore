@@ -3,4 +3,4 @@ node_modules
 .env
 postman
 /src/generated/prisma
-FRONTEND_API_GUIDE.md
+FRONTEND_API_GUIDE.

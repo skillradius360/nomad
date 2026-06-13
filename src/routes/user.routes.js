@@ -8,6 +8,7 @@ import {
     fetchAllSellers,
     fetchAllBuyers,
     fetchUserProfile,
+    fetchAllUserOverviewData,
     fetchAllUsers} from "../controllers/users/user.controller.js";
 import { isAdmin, isSelfOrAdmin } from "../middleware/admin.middleware.js";
 import { verifyJWT } from "../middleware/auth.middleware.js";
@@ -16,6 +17,7 @@ export const userRouter = Router();
 
 userRouter.use(verifyJWT);
 
+userRouter.route("/all-data").get(isAdmin, fetchAllUserOverviewData);
 userRouter.route("/").get(isAdmin, fetchAllUsers);
 userRouter.route("/suspend/:userId").patch(isAdmin, SuspendUser);
 userRouter.route("/sellers").get(isAdmin,fetchAllSellers);

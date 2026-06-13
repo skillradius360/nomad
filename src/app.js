@@ -16,6 +16,7 @@ import { adRouter } from "./routes/ads.routes.js";
 import { tagRouter } from "./routes/tags.routes.js";
 import { offerRouter } from "./routes/offers.routes.js";
 import { revenueRouter } from "./routes/revenue.routes.js";
+import { bannerRouter } from "./routes/banners.routes.js";
 import { asyncHandler } from "./utils/asyncHandler.js";
 import { verifyJWT } from "./middleware/auth.middleware.js";
 import apiError from "./utils/apiError.js";
@@ -38,10 +39,15 @@ const healthCheck = asyncHandler(async (req, res) => {
 })
 
 app.use(express.json());
-app.get("/health",healthCheck)
 app.use((req,res,next,err)=>{
-  throw new apiError(500,err)
+  res.status(err.statusCode || 500).json({
+    success: false,
+    message: err.message || "Internal Server Error",
+    stack: err.stack || " "
+  });
 })
+app.get("/health",healthCheck)
+
 const corsOptions = {
   origin: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
@@ -66,14 +72,15 @@ app.use("/ads", adRouter);
 app.use("/tags", tagRouter);
 app.use("/offers", offerRouter);
 app.use("/revenue", revenueRouter);
+app.use("/banners", bannerRouter);
 
 app.get("/", (req, res) => {
   const logo = `
-    _   ______  __  ___    ___    ____ 
-   / | / / __ \\/  |/  /   /   |  / __ \\
+    _   ______  __  ___   ___ _  ____ 
+   / | / / __ \\/  |/  /  /   |  / __ \\
   /  |/ / / / / /|_/ /   / /| | / / / /
  / /|  / /_/ / /  / /   / ___ |/ /_/ / 
-/_/ |_/\\____/_/  /_/   /_/  |_/_____/  
+/_/ |_/\\____/_/  /_/  /__/  |_/_____/  
 `;
 
   res.send(`
