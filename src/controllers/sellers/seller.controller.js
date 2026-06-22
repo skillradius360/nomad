@@ -141,6 +141,25 @@ const getSellerProfile = asyncHandler(async (req, res) => {
                 orderBy: {
                     createdAt: "desc",
                 },
+                select:{
+                    id:true,
+                    shopName:true,
+                    shopImage:true,
+                    Address:true,
+                    Tags:true,
+                    Description:true,
+                    ShopOpenStatus:true,
+                    status:true,
+                    Verified:true,
+                    billingStatus:true,
+                    slug:true,
+                    MinimumDeliveryRate:true,
+                    FreeDeliveryRate:true,
+                    latitude:true,
+                    longitude:true,
+                    createdAt:true,
+                    updatedAt:true
+                }
             },
             createdAt: true,
             updatedAt: true,

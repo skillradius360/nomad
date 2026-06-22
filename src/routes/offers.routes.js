@@ -11,6 +11,7 @@ import {
 } from "../controllers/offers/offers.controller.js";
 import { verifyJWT } from "../middleware/auth.middleware.js";
 import { upload } from "../middleware/multer.middleware.js";
+import { buyerReadRateLimit, expensiveReadRateLimit, uploadRateLimit, writeRateLimit } from "../middleware/rateLimit.middleware.js";
 
 export const offerRouter = Router();
 
@@ -18,9 +19,9 @@ offerRouter.use(verifyJWT);
 
 const offerImageUpload = upload.fields([{ name: "offerImg", maxCount: 1 }]);
 
-offerRouter.route("/create").post(offerImageUpload, createOffer);
-offerRouter.route("/shop/:shopId/available").get(fetchAvailableOffersByShop);
-offerRouter.route("/shop/:shopId/buyers/search").get(searchBuyersForOfferTarget);
-offerRouter.route("/shop/:shopId").get(fetchOffersByShop);
-offerRouter.route("/:offerId/active").patch(updateOfferActiveStatus);
-offerRouter.route("/:offerId").get(fetchOfferById).patch(offerImageUpload, updateOffer).delete(deleteOffer);
+offerRouter.route("/create").post(uploadRateLimit, offerImageUpload, createOffer);
+offerRouter.route("/shop/:shopId/available").get(buyerReadRateLimit, fetchAvailableOffersByShop);
+offerRouter.route("/shop/:shopId/buyers/search").get(expensiveReadRateLimit, searchBuyersForOfferTarget);
+offerRouter.route("/shop/:shopId").get(buyerReadRateLimit, fetchOffersByShop);
+offerRouter.route("/:offerId/active").patch(writeRateLimit, updateOfferActiveStatus);
+offerRouter.route("/:offerId").get(fetchOfferById).patch(uploadRateLimit, offerImageUpload, updateOffer).delete(writeRateLimit, deleteOffer);

@@ -1,6 +1,8 @@
 import { prisma } from "../../db/index.js";
 import { apiError, apiResponse, asyncHandler } from "../../utils/handler.js";
 import { cloudUploader } from "../../utils/cloudinary.upload.js";
+import { getCachedData, setCachedData } from "../../utils/cache.js";
+import { buildPaginationMeta, getPagination } from "../../utils/pagination.js";
 
 const parseRechargeAmount = (amount) => {
     const parsedAmount = Number(amount);
@@ -55,6 +57,94 @@ const buildTrialState = (shop) => {
         trialEndsAt: shop.trialEndsAt,
         trialDaysRemaining: remainingMilliseconds === null ? null : Math.ceil(remainingMilliseconds / MILLISECONDS_IN_DAY),
         paymentRequired,
+    };
+};
+
+const formatShopBrowseItem = (shopItem)=>({
+    id:shopItem.id,
+    itemId:shopItem.item?.id,
+    name:shopItem.item?.name,
+    pricing:shopItem.pricing,
+    finalPrice:Math.max(0,Math.round(Number(shopItem.pricing))),
+    availableQuantity:shopItem.availableQuantity,
+    imageUrl:shopItem.imageUrl || shopItem.item?.imageUrl || null,
+    description:shopItem.description,
+    sortOrderId:shopItem.sortOrderId,
+    active:shopItem.active,
+    categoryId:shopItem.item?.categoryId || null,
+    categoryName:shopItem.item?.category?.name || null,
+    cuisineId:shopItem.item?.category?.cuisineId || null
+});
+
+const formatShopBrowseCombo = (combo)=>({
+    id:combo.id,
+    name:combo.name,
+    description:combo.description,
+    imageUrl:combo.imageUrl,
+    totalPrice:combo.totalPrice,
+    availableQuantity:combo.availableQuantity,
+    sortOrderId:combo.sortOrderId,
+    active:combo.active,
+    cuisineId:combo.cuisine?.id || null,
+    cuisineName:combo.cuisine?.name || null,
+    categoryId:combo.category?.id || null,
+    categoryName:combo.category?.name || null,
+    items:combo.items?.map((comboItem)=>({
+        id:comboItem.item?.id,
+        comboItemId:comboItem.id,
+        itemId:comboItem.item?.item?.id,
+        name:comboItem.item?.item?.name,
+        quantity:comboItem.quantity,
+        pricing:comboItem.item?.pricing,
+        finalPrice:Math.max(0,Math.round(Number(comboItem.item?.pricing))),
+        imageUrl:comboItem.item?.imageUrl || comboItem.item?.item?.imageUrl || null,
+        description:comboItem.item?.description,
+        categoryId:comboItem.item?.item?.categoryId || null
+    })) || []
+});
+
+const formatShopBrowseData = (shopData)=>({
+    ...shopData,
+    trial:buildTrialState(shopData),
+    shopType:shopData.shopType ? {
+        id:shopData.shopType.id,
+        name:shopData.shopType.name,
+        slug:shopData.shopType.slug,
+        features:shopData.shopType.features?.map((feature)=>feature.feature) || []
+    } : null,
+    items:shopData.items?.map(formatShopBrowseItem) || [],
+    combos:shopData.combos?.map(formatShopBrowseCombo) || []
+});
+
+const formatFullShopData = (shop)=>{
+    const openState = calculateShopOpenState(shop);
+
+    return {
+        id:shop.id,
+        shopName:shop.shopName,
+        shopImage:shop.shopImage,
+        address:shop.Address,
+        tags:shop.Tags,
+        description:shop.Description,
+        slug:shop.slug,
+        verified:shop.Verified,
+        shopType:shop.shopType,
+        delivery:{
+            minimumRate:shop.MinimumDeliveryRate,
+            freeRate:shop.FreeDeliveryRate
+        },
+        location:{
+            latitude:shop.latitude,
+            longitude:shop.longitude
+        },
+        owner:shop.owner,
+        configuredStatus:openState.configuredStatus,
+        openStatus:openState.openStatus,
+        isOpenNow:openState.isOpenNow,
+        todayTiming:openState.todayTiming,
+        timings:shop.timings,
+        items:shop.items,
+        combos:shop.combos
     };
 };
 
@@ -144,7 +234,7 @@ function generateRandom(length = 4) {
 const createShop = asyncHandler(async(req,res)=>{
 
     const {shopName,description,
-        latitude, longitude,shopCategory}= req.body
+        latitude, longitude,shopTypeId,shopTypeSlug}= req.body
         const ownerId = req.userData?.id;
 
         if (!ownerId) {
@@ -166,6 +256,24 @@ const createShop = asyncHandler(async(req,res)=>{
         const createSlug = await shopName.charAt(0)+shopName.charAt(1)+generateRandom(4)
         if(!createSlug.length>5) throw new apiError(400,"slug creation error")
 
+        let selectedShopType = null;
+        if(shopTypeId || shopTypeSlug){
+            selectedShopType = await prisma.shopType.findFirst({
+                where:shopTypeId ? {
+                    id:shopTypeId,
+                    active:true
+                } : {
+                    slug:String(shopTypeSlug).trim().toUpperCase(),
+                    active:true
+                },
+                select:{
+                    id:true
+                }
+            });
+
+            if(!selectedShopType) throw new apiError(404,"shop type not found");
+        }
+
         const shopData = await prisma.shop.create({
             data: {
         shopName,
@@ -181,9 +289,28 @@ const createShop = asyncHandler(async(req,res)=>{
         Verified:req.currentUser?.role === "ADMIN",
         latitude: parseOptionalCoordinate(latitude, "latitude"),
         longitude: parseOptionalCoordinate(longitude, "longitude"),
-        shopCategory:shopCategory
+        shopTypeId:selectedShopType?.id
     },
-    include:{
+    select:{
+        id:true,
+        shopName:true,
+        shopImage:true,
+        Description:true,
+        slug:true,
+        ShopOpenStatus:true,
+        status:true,
+        Verified:true,
+        shopType:{
+            select:{
+                id:true,
+                name:true,
+                slug:true,
+                features:{
+                    where:{enabled:true},
+                    select:{feature:true}
+                }
+            }
+        },
         timings:{
             orderBy:{
                 dayOfWeek:"asc"
@@ -194,13 +321,39 @@ const createShop = asyncHandler(async(req,res)=>{
 
     if(!shopData) throw new apiError(400," shop data creation process failed failed! ")
 
-    return res.json(new apiResponse(200,shopData,"shop creation consent send and updated in Database"))
+    return res.json(new apiResponse(200,{
+        id:shopData.id,
+        shopName:shopData.shopName,
+        shopImage:shopData.shopImage,
+        slug:shopData.slug,
+        verified:shopData.Verified,
+        status:shopData.status,
+        shopType:shopData.shopType ? {
+            id:shopData.shopType.id,
+            name:shopData.shopType.name,
+            slug:shopData.shopType.slug,
+            features:shopData.shopType.features.map((feature)=>feature.feature)
+        } : null
+    },"shop creation consent send and updated in Database"))
 })
 
 
 // ADMIN
 const makeSellerGoLive = asyncHandler(async (req, res) => {
     const id = req.params.shopId;
+
+    if(!id) throw new apiError(400,"shop id is required");
+
+    const existingShop = await prisma.shop.findUnique({
+        where:{
+            id
+        },
+        select:{
+            id:true
+        }
+    });
+
+    if(!existingShop) throw new apiError(404,"shop not found");
 
     const shopData = await prisma.shop.update({
         where: {
@@ -209,27 +362,53 @@ const makeSellerGoLive = asyncHandler(async (req, res) => {
         data: {
             Verified: true,
         },
+        select:{
+            id:true,
+            shopName:true,
+            Verified:true
+        }
     });
 
     if(!shopData) throw new apiError(400,"new seller invocation failure")
     return res
         .status(200)
-        .json(new apiResponse(200, shopData, "Seller creation verified successfully"));
+        .json(new apiResponse(200, {
+            id:shopData.id,
+            shopName:shopData.shopName,
+            verified:shopData.Verified
+        }, "Seller creation verified successfully"));
 });
 
 // ADMIN
 const deleteSeller = asyncHandler(async (req, res) => {
     const id = req.params.shopId;
 
+    if(!id) throw new apiError(400,"shop id is required");
+
+    const existingShop = await prisma.shop.findUnique({
+        where:{
+            id
+        },
+        select:{
+            id:true
+        }
+    });
+
+    if(!existingShop) throw new apiError(404,"shop not found");
+
     const delStatus = await prisma.shop.delete({
         where: {
             id,
         },
+        select:{
+            id:true,
+            shopName:true
+        }
     });
     if(!delStatus) throw new apiError(400,"Revoking of target seller failed")
     return res
         .status(200)
-        .json(new apiResponse(200, null, "Seller creation revoked successfully"));
+        .json(new apiResponse(200, delStatus, "Seller creation revoked successfully"));
 });
 
 const findFullShopData = asyncHandler(async(req,res)=>{
@@ -237,177 +416,113 @@ const findFullShopData = asyncHandler(async(req,res)=>{
 
     if(!shopId) throw new apiError(400," shopId is not passed!")
 
-    const shopData = await prisma.shop.findUnique({
-        where: {
-            id: shopId
-        },
-        select: {
-            id: true,
-            shopName:true,
-            shopImage:true,
-            Address:true,
-            Tags:true,
-            Description:true,
-            OpeningTime:true,
-            ClosingTime:true,
-            ShopOpenStatus:true,
-            status:true,
-            Holidays:true,
-            timings:{
-                orderBy:{
-                    dayOfWeek:"asc"
-                },
-                select:{
-                    id:true,
-                    dayOfWeek:true,
-                    startMinute:true,
-                    endMinute:true,
-                    active:true
-                }
-            },
-            Verified:true,
-            billingStatus:true,
-            trialStartedAt:true,
-            trialDays:true,
-            trialEndsAt:true,
-            shopCategory:true,
-            MinimumDeliveryRate:true,
-            FreeDeliveryRate:true,
-            latitude:true,
-            longitude:true,
-            owner: {
-                select: {
-                    id: true,
-                    name:true,
-                    profileImg:true
-                }
-            },
-            items:{
-                where:{
-                    active:true
-                },
-                orderBy:{
-                    sortOrderId:"asc"
-                },
-                select:{
-                    id:true,
-                    pricing:true,
-                    availableQuantity:true,
-                    imageUrl:true,
-                    description:true,
-                    sortOrderId:true,
-                    active:true,
-                    item:{
-                        select:{
-                            id:true,
-                            name:true,
-                            imageUrl:true,
-                            sortOrderId:true,
-                            active:true,
-                            categoryId:true,
-                            category:{
-                                select:{
-                                    id:true,
-                                    name:true,
-                                    slug:true,
-                                    cuisineId:true
-                                }
-                            }
-                        }
-                    }
-                }
-            },
-            combos:{
-                where:{
-                    active:true
-                },
-                orderBy:{
-                    sortOrderId:"asc"
-                },
-                select:{
-                    id:true,
-                    name:true,
-                    description:true,
-                    imageUrl:true,
-                    totalPrice:true,
-                    discount:true,
-                    percentageDiscount:true,
-                    finalPrice:true,
-                    availableQuantity:true,
-                    sortOrderId:true,
-                    active:true,
-                    cuisine:{
-                        select:{
-                            id:true,
-                            name:true,
-                            slug:true
-                        }
-                    },
-                    category:{
-                        select:{
-                            id:true,
-                            name:true,
-                            slug:true
-                        }
-                    },
-                    items:{
-                        select:{
-                            id:true,
-                            quantity:true,
-                            item:{
-                                select:{
-                                    id:true,
-                                    pricing:true,
-                                    imageUrl:true,
-                                    description:true,
-                                    item:{
-                                        select:{
-                                            id:true,
-                                            name:true,
-                                            imageUrl:true,
-                                            categoryId:true
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    });
+    const cacheKey = `buyer:shop:full:v3:${shopId}`;
+    const cachedShop = await getCachedData(cacheKey);
+    if(cachedShop){
+        return res.status(200).json(new apiResponse(200,cachedShop,"full shop data fetched"));
+    }
+
+    const [shopData] = await prisma.$queryRaw`
+        SELECT
+            s.id,
+            s."shopName",
+            s."shopImage",
+            s."Address",
+            s."Tags",
+            s."Description",
+            s.slug,
+            s."OpeningTime",
+            s."ClosingTime",
+            s."ShopOpenStatus",
+            s.status,
+            s."Holidays",
+            s."Verified",
+            s."MinimumDeliveryRate",
+            s."FreeDeliveryRate",
+            s.latitude,
+            s.longitude,
+            CASE WHEN st.id IS NULL THEN NULL ELSE jsonb_build_object(
+                'id',st.id,
+                'name',st.name,
+                'slug',st.slug,
+                'features',COALESCE((
+                    SELECT jsonb_agg(stf.feature ORDER BY stf.feature)
+                    FROM "ShopTypeFeature" stf
+                    WHERE stf."shopTypeId" = st.id AND stf.enabled = true
+                ),'[]'::jsonb)
+            ) END AS "shopType",
+            jsonb_build_object('id',u.id,'name',u.name,'profileImg',u."profileImg") AS owner,
+            COALESCE((
+                SELECT jsonb_agg(jsonb_build_object(
+                    'dayOfWeek',timing."dayOfWeek",
+                    'startMinute',timing."startMinute",
+                    'endMinute',timing."endMinute",
+                    'active',timing.active
+                ) ORDER BY timing."dayOfWeek")
+                FROM "ShopTiming" timing
+                WHERE timing."shopId" = s.id
+            ),'[]'::jsonb) AS timings,
+            COALESCE((
+                SELECT jsonb_agg(jsonb_build_object(
+                    'id',si.id,
+                    'itemId',i.id,
+                    'name',i.name,
+                    'pricing',si.pricing,
+                    'availableQuantity',si."availableQuantity",
+                    'imageUrl',COALESCE(si."imageUrl",i."imageUrl"),
+                    'description',si.description,
+                    'category',CASE WHEN category.id IS NULL THEN NULL ELSE jsonb_build_object(
+                        'id',category.id,
+                        'name',category.name,
+                        'cuisineId',category."cuisineId"
+                    ) END
+                ) ORDER BY si."sortOrderId")
+                FROM "ShopItem" si
+                JOIN "Items" i ON i.id = si."itemId"
+                LEFT JOIN "Categories" category ON category.id = i."categoryId"
+                WHERE si."shopId" = s.id AND si.active = true
+            ),'[]'::jsonb) AS items,
+            COALESCE((
+                SELECT jsonb_agg(jsonb_build_object(
+                    'id',combo.id,
+                    'name',combo.name,
+                    'description',combo.description,
+                    'imageUrl',combo."imageUrl",
+                    'totalPrice',combo."totalPrice",
+                    'availableQuantity',combo."availableQuantity",
+                    'cuisine',CASE WHEN cuisine.id IS NULL THEN NULL ELSE jsonb_build_object('id',cuisine.id,'name',cuisine.name) END,
+                    'category',CASE WHEN combo_category.id IS NULL THEN NULL ELSE jsonb_build_object('id',combo_category.id,'name',combo_category.name) END,
+                    'items',COALESCE((
+                        SELECT jsonb_agg(jsonb_build_object(
+                            'id',combo_shop_item.id,
+                            'itemId',master_item.id,
+                            'name',master_item.name,
+                            'quantity',combo_item.quantity,
+                            'pricing',combo_shop_item.pricing,
+                            'imageUrl',COALESCE(combo_shop_item."imageUrl",master_item."imageUrl")
+                        ))
+                        FROM "ComboItem" combo_item
+                        JOIN "ShopItem" combo_shop_item ON combo_shop_item.id = combo_item."itemId"
+                        JOIN "Items" master_item ON master_item.id = combo_shop_item."itemId"
+                        WHERE combo_item."comboId" = combo.id
+                    ),'[]'::jsonb)
+                ) ORDER BY combo."sortOrderId")
+                FROM "Combo" combo
+                LEFT JOIN "Cuisine" cuisine ON cuisine.id = combo."cuisineId"
+                LEFT JOIN "Categories" combo_category ON combo_category.id = combo."categoryId"
+                WHERE combo."shopId" = s.id AND combo.active = true
+            ),'[]'::jsonb) AS combos
+        FROM "Shop" s
+        LEFT JOIN "User" u ON u.id = s."ownerId"
+        LEFT JOIN "ShopType" st ON st.id = s."shopTypeId"
+        WHERE s.id = ${shopId}
+        LIMIT 1
+    `;
 
     if(!shopData) throw new apiError(404,"The shop details failed to fetch")
 
-    const responseData = {
-        ...shopData,
-        trial:buildTrialState(shopData),
-        items:shopData.items.map((shopItem)=>{
-            const itemPrice = Number(shopItem.pricing);
-            const finalPrice = Math.max(0,Math.round(itemPrice));
-
-            return {
-                ...shopItem,
-                finalPrice
-            };
-        }),
-        combos:shopData.combos.map((combo)=>({
-            ...combo,
-            finalPrice:combo.finalPrice ?? Math.max(0,Math.round(Number(combo.totalPrice) - Number(combo.discount ?? 0) - (Number(combo.totalPrice) * Number(combo.percentageDiscount ?? 0) / 100))),
-            items:combo.items.map((comboItem)=>{
-                const itemPrice = Number(comboItem.item.pricing);
-                const finalPrice = Math.max(0,Math.round(itemPrice));
-
-                return {
-                    ...comboItem,
-                    item:{
-                        ...comboItem.item,
-                        finalPrice
-                    }
-                };
-            })
-        }))
-    };
+    const responseData = formatFullShopData(shopData);
+    void setCachedData(cacheKey,responseData,60);
 
     return res.status(200).json(new apiResponse(200,responseData,"full shop data fetched"))
 })
@@ -456,21 +571,19 @@ const setShopTrialPeriod = asyncHandler(async(req,res)=>{
         select:{
             id:true,
             shopName:true,
-            ownerId:true,
-            Verified:true,
             billingStatus:true,
             trialStartedAt:true,
             trialDays:true,
-            trialEndsAt:true,
-            createdAt:true,
-            updatedAt:true
+            trialEndsAt:true
         }
     });
 
     return res
         .status(200)
         .json(new apiResponse(200,{
-            ...shopData,
+            id:shopData.id,
+            shopName:shopData.shopName,
+            billingStatus:shopData.billingStatus,
             trial:buildTrialState(shopData)
         },"shop trial period updated successfully"));
 })
@@ -600,11 +713,8 @@ const setShopTimings = asyncHandler(async(req,res)=>{
         select:{
             id:true,
             shopName:true,
-            OpeningTime:true,
-            ClosingTime:true,
             Holidays:true,
             ShopOpenStatus:true,
-            status:true,
             timings:{
                 orderBy:{
                     dayOfWeek:"asc"
@@ -620,7 +730,13 @@ const setShopTimings = asyncHandler(async(req,res)=>{
         }
     });
 
-    return res.status(200).json(new apiResponse(200,shopData,"shop timings updated successfully"));
+    return res.status(200).json(new apiResponse(200,{
+        id:shopData.id,
+        shopName:shopData.shopName,
+        configuredStatus:shopData.ShopOpenStatus,
+        holidays:shopData.Holidays,
+        timings:shopData.timings
+    },"shop timings updated successfully"));
 })
 
 
@@ -631,7 +747,8 @@ const editShopSettings = asyncHandler(async(req,res)=>{
         description,
         address,
         tags,
-        shopCategory,
+        shopTypeId,
+        shopTypeSlug,
         shopOpenStatus,
         openingTime,
         closingTime,
@@ -673,7 +790,25 @@ const editShopSettings = asyncHandler(async(req,res)=>{
     if(description !== undefined) dataToUpdate.Description = String(description).trim();
     if(address !== undefined) dataToUpdate.Address = String(address).trim();
     if(tags !== undefined) dataToUpdate.Tags = Array.isArray(tags) ? tags.join(",") : String(tags).trim();
-    if(shopCategory !== undefined) dataToUpdate.shopCategory = String(shopCategory).trim().toUpperCase();
+    if(shopTypeId !== undefined || shopTypeSlug !== undefined){
+        if(shopTypeId === null || shopTypeId === "" || shopTypeSlug === null || shopTypeSlug === ""){
+            dataToUpdate.shopTypeId = null;
+        }else{
+            const selectedShopType = await prisma.shopType.findFirst({
+                where:shopTypeId !== undefined ? {
+                    id:String(shopTypeId),
+                    active:true
+                } : {
+                    slug:String(shopTypeSlug).trim().toUpperCase(),
+                    active:true
+                },
+                select:{id:true}
+            });
+
+            if(!selectedShopType) throw new apiError(404,"shop type not found");
+            dataToUpdate.shopTypeId = selectedShopType.id;
+        }
+    }
     if(latitude !== undefined) dataToUpdate.latitude = parseOptionalCoordinate(latitude,"latitude");
     if(longitude !== undefined) dataToUpdate.longitude = parseOptionalCoordinate(longitude,"longitude");
 
@@ -818,7 +953,17 @@ const editShopSettings = asyncHandler(async(req,res)=>{
             status:true,
             Holidays:true,
             Verified:true,
-            shopCategory:true,
+            shopType:{
+                select:{
+                    id:true,
+                    name:true,
+                    slug:true,
+                    features:{
+                        where:{enabled:true},
+                        select:{feature:true}
+                    }
+                }
+            },
             MinimumDeliveryRate:true,
             FreeDeliveryRate:true,
             latitude:true,
@@ -838,7 +983,28 @@ const editShopSettings = asyncHandler(async(req,res)=>{
         }
     });
 
-    return res.status(200).json(new apiResponse(200,shopData,"shop settings updated successfully"));
+    return res.status(200).json(new apiResponse(200,{
+        id:shopData.id,
+        shopName:shopData.shopName,
+        shopImage:shopData.shopImage,
+        address:shopData.Address,
+        tags:shopData.Tags,
+        description:shopData.Description,
+        configuredStatus:shopData.ShopOpenStatus,
+        holidays:shopData.Holidays,
+        verified:shopData.Verified,
+        shopType:shopData.shopType ? {
+            id:shopData.shopType.id,
+            name:shopData.shopType.name,
+            slug:shopData.shopType.slug,
+            features:shopData.shopType.features.map((feature)=>feature.feature)
+        } : null,
+        minimumDeliveryRate:shopData.MinimumDeliveryRate,
+        freeDeliveryRate:shopData.FreeDeliveryRate,
+        latitude:shopData.latitude,
+        longitude:shopData.longitude,
+        timings:shopData.timings
+    },"shop settings updated successfully"));
 })
 
 const setShopStatus = asyncHandler(async(req,res)=>{
@@ -920,7 +1086,8 @@ const setShopStatus = asyncHandler(async(req,res)=>{
     const openState = calculateShopOpenState(shopData);
 
     return res.status(200).json(new apiResponse(200,{
-        ...shopData,
+        id:shopData.id,
+        shopName:shopData.shopName,
         configuredStatus:openState.configuredStatus,
         openStatus:openState.openStatus,
         isOpenNow:openState.isOpenNow,
@@ -937,6 +1104,7 @@ const findNearbyShops = asyncHandler(async(req,res)=>{
     if(!Number.isFinite(radiusKm) || radiusKm <= 0){
         throw new apiError(400,"radius must be a valid positive number");
     }
+    const pagination = getPagination(req.query,{defaultLimit:20,maxLimit:50});
 
     const buyer = await prisma.user.findUnique({
         where:{
@@ -964,6 +1132,14 @@ const findNearbyShops = asyncHandler(async(req,res)=>{
     const longitudeScale = Math.abs(Math.cos((buyer.latitude * Math.PI) / 180));
     const longitudeDelta = longitudeScale < 0.000001 ? 180 : radiusKm / (111.32 * longitudeScale);
     const debugNearby = isTruthyQuery(req.query.debug);
+    const cacheKey = `buyer:shops:nearby:v2:${buyerId}:${radiusKm}:${requestedStatus}:${pagination.page}:${pagination.limit}:${debugNearby}`;
+
+    if(!debugNearby){
+        const cachedNearbyShops = await getCachedData(cacheKey);
+        if(cachedNearbyShops){
+            return res.status(200).json(new apiResponse(200,cachedNearbyShops,"nearby shops fetched successfully"));
+        }
+    }
 
     const shops = await prisma.shop.findMany({
         where:{
@@ -992,7 +1168,17 @@ const findNearbyShops = asyncHandler(async(req,res)=>{
             status:true,
             Holidays:true,
             Verified:true,
-            shopCategory:true,
+            shopType:{
+                select:{
+                    id:true,
+                    name:true,
+                    slug:true,
+                    features:{
+                        where:{enabled:true},
+                        select:{feature:true}
+                    }
+                }
+            },
             MinimumDeliveryRate:true,
             FreeDeliveryRate:true,
             latitude:true,
@@ -1013,7 +1199,7 @@ const findNearbyShops = asyncHandler(async(req,res)=>{
     });
 
     const debugCounts = debugNearby
-        ? await prisma.$transaction([
+        ? await Promise.all([
             prisma.shop.count(),
             prisma.shop.count({
                 where:{
@@ -1064,14 +1250,35 @@ const findNearbyShops = asyncHandler(async(req,res)=>{
     const nearbyShops = shopsWithinRadius
         .filter((shop)=>requestedStatus === "ALL" || shop.openStatus === requestedStatus);
 
-    return res.status(200).json(new apiResponse(200,{
+    const responseData = {
+        pagination:buildPaginationMeta({
+            page:pagination.page,
+            limit:pagination.limit,
+            total:nearbyShops.length
+        }),
         radiusKm,
-        buyerLocation:{
-            latitude:buyer.latitude,
-            longitude:buyer.longitude
-        },
-        totalShops:nearbyShops.length,
-        shops:nearbyShops,
+        shops:nearbyShops.slice(pagination.skip,pagination.skip + pagination.limit).map((shop)=>({
+            id:shop.id,
+            shopName:shop.shopName,
+            shopImage:shop.shopImage,
+            address:shop.Address,
+            description:shop.Description,
+            tags:shop.Tags,
+            slug:shop.slug,
+            shopType:shop.shopType ? {
+                id:shop.shopType.id,
+                name:shop.shopType.name,
+                slug:shop.shopType.slug,
+                features:shop.shopType.features?.map((feature)=>feature.feature) || []
+            } : null,
+            minimumDeliveryRate:shop.MinimumDeliveryRate,
+            freeDeliveryRate:shop.FreeDeliveryRate,
+            distanceKm:shop.distanceKm,
+            configuredStatus:shop.configuredStatus,
+            openStatus:shop.openStatus,
+            isOpenNow:shop.isOpenNow,
+            todayTiming:shop.todayTiming
+        })),
         ...(debugNearby ? {
             debug:{
                 requestedStatus,
@@ -1091,13 +1298,25 @@ const findNearbyShops = asyncHandler(async(req,res)=>{
                 statusFilteredOut:shopsWithinRadius.length - nearbyShops.length
             }
         } : {})
-    },"nearby shops fetched successfully"));
+    };
+
+    if(!debugNearby){
+        await setCachedData(cacheKey,responseData,30);
+    }
+
+    return res.status(200).json(new apiResponse(200,responseData,"nearby shops fetched successfully"));
 })
 
 
 const findByShopSlug = asyncHandler(async(req,res)=>{
     const { slug} = req.params
     if(!slug) throw new apiError(400," slug not recieved from user")
+
+    const cacheKey = `buyer:shop:slug:${slug}`;
+    const cachedShop = await getCachedData(cacheKey);
+    if(cachedShop){
+        return res.status(200).json(new apiResponse(200,cachedShop,"slug based shop found"));
+    }
     
     const shopData = await prisma.shop.findUnique({
         where: {
@@ -1132,7 +1351,17 @@ const findByShopSlug = asyncHandler(async(req,res)=>{
             trialStartedAt:true,
             trialDays:true,
             trialEndsAt:true,
-            shopCategory:true,
+            shopType:{
+                select:{
+                    id:true,
+                    name:true,
+                    slug:true,
+                    features:{
+                        where:{enabled:true},
+                        select:{feature:true}
+                    }
+                }
+            },
             MinimumDeliveryRate:true,
             FreeDeliveryRate:true,
             latitude:true,
@@ -1192,9 +1421,6 @@ const findByShopSlug = asyncHandler(async(req,res)=>{
                     description:true,
                     imageUrl:true,
                     totalPrice:true,
-                    discount:true,
-                    percentageDiscount:true,
-                    finalPrice:true,
                     availableQuantity:true,
                     sortOrderId:true,
                     active:true,
@@ -1241,7 +1467,10 @@ const findByShopSlug = asyncHandler(async(req,res)=>{
 
     if(!shopData) throw new apiError(400,"The slug cant be found")
 
-    return res.status(200).json(new apiResponse(200,shopData,"slug based shop found"))
+    const responseData = formatShopBrowseData(shopData);
+    await setCachedData(cacheKey,responseData,60);
+
+    return res.status(200).json(new apiResponse(200,responseData,"slug based shop found"))
 })
 
 // ************************************************************************************************

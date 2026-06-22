@@ -1,14 +1,20 @@
 import { prisma } from "../../db/index.js";
 import { apiError, apiResponse, asyncHandler } from "../../utils/handler.js";
+import { deleteCacheByPattern, getOrSetCachedData } from "../../utils/cache.js";
+import { buildPaginationMeta, getPagination } from "../../utils/pagination.js";
+import { shopHasFeature } from "../../utils/shopFeatures.js";
+import { releaseShopSlot, reserveShopSlot } from "../../utils/billing.js";
 
-const comboInclude = {
-    shop:{
-        select:{
-            id:true,
-            shopName:true,
-            ownerId:true
-        }
-    },
+const comboListSelect = {
+    id:true,
+    shopId:true,
+    name:true,
+    description:true,
+    imageUrl:true,
+    totalPrice:true,
+    active:true,
+    availableQuantity:true,
+    sortOrderId:true,
     cuisine:{
         select:{
             id:true,
@@ -44,21 +50,11 @@ const comboInclude = {
                     pricing:true,
                     availableQuantity:true,
                     imageUrl:true,
-                    description:true,
                     item:{
                         select:{
                             id:true,
                             name:true,
-                            imageUrl:true,
-                            categoryId:true,
-                            category:{
-                                select:{
-                                    id:true,
-                                    name:true,
-                                    slug:true,
-                                    cuisineId:true
-                                }
-                            }
+                            imageUrl:true
                         }
                     }
                 }
@@ -67,16 +63,63 @@ const comboInclude = {
     }
 };
 
+const comboMutationSelect = {
+    id:true,
+    shopId:true,
+    name:true,
+    description:true,
+    imageUrl:true,
+    totalPrice:true,
+    active:true,
+    availableQuantity:true,
+    sortOrderId:true,
+    cuisineId:true,
+    categoryId:true,
+    items:{
+        select:{
+            id:true,
+            itemId:true,
+            quantity:true
+        }
+    }
+};
+
+const formatComboListItem = (combo)=>({
+    id:combo.id,
+    shopId:combo.shopId,
+    name:combo.name,
+    description:combo.description,
+    imageUrl:combo.imageUrl,
+    totalPrice:combo.totalPrice,
+    active:combo.active,
+    availableQuantity:combo.availableQuantity,
+    sortOrderId:combo.sortOrderId,
+    cuisineId:combo.cuisine?.id || null,
+    cuisineName:combo.cuisine?.name || null,
+    categoryId:combo.category?.id || null,
+    categoryName:combo.category?.name || null,
+    tags:combo.tags?.map((tag)=>({
+        id:tag.tag?.id,
+        name:tag.tag?.name
+    })) || [],
+    items:combo.items?.map((comboItem)=>({
+        id:comboItem.item?.id,
+        comboItemId:comboItem.id,
+        quantity:comboItem.quantity,
+        pricing:comboItem.item?.pricing,
+        availableQuantity:comboItem.item?.availableQuantity,
+        imageUrl:comboItem.item?.imageUrl || comboItem.item?.item?.imageUrl || null,
+        itemId:comboItem.item?.item?.id,
+        name:comboItem.item?.item?.name
+    })) || []
+});
+
 const createCombo = asyncHandler(async(req,res)=>{
     const {
         shopId,
         name,
         description,
         imageUrl,
-        totalPrice,
-        discount,
-        percentageDiscount,
-        finalPrice,
         cuisineId,
         cuisineName,
         categoryId,
@@ -91,48 +134,84 @@ const createCombo = asyncHandler(async(req,res)=>{
     if(!shopId) throw new apiError(400,"shop id is required");
     if(!name) throw new apiError(400,"combo name is required");
 
-    const currentUser = await prisma.user.findUnique({
-        where:{
-            id:req.userData?.id
-        },
-        select:{
-            id:true,
-            role:true,
-            isBlocked:true
-        }
+    const selectedItems = Array.isArray(items) && items.length > 0 ? items : itemIds;
+    if(!Array.isArray(selectedItems) || selectedItems.length === 0){
+        throw new apiError(400,"combo items are required");
+    }
+
+    const normalizedItems = selectedItems.map((item)=>{
+        if(typeof item === "string") return {itemId:item,quantity:1};
+        return {
+            itemId:item.itemId || item.id,
+            quantity:Number(item.quantity ?? 1)
+        };
     });
+
+    if(normalizedItems.some((item)=>!item.itemId)){
+        throw new apiError(400,"each combo item needs an itemId");
+    }
+    if(normalizedItems.some((item)=>!Number.isInteger(item.quantity) || item.quantity < 1)){
+        throw new apiError(400,"combo item quantity must be a positive integer");
+    }
+
+    const uniqueItemIds = [...new Set(normalizedItems.map((item)=>String(item.itemId)))];
+    if(uniqueItemIds.length !== normalizedItems.length){
+        throw new apiError(400,"duplicate combo items are not allowed");
+    }
+
+    const [currentUser,shop,cuisine,comboItemsData] = await Promise.all([
+        prisma.user.findUnique({
+            where:{id:req.userData?.id},
+            select:{id:true,role:true,isBlocked:true}
+        }),
+        prisma.shop.findUnique({
+            where:{id:shopId},
+            select:{
+                id:true,
+                ownerId:true,
+                shopType:{
+                    select:{
+                        features:{where:{enabled:true},select:{feature:true}}
+                    }
+                },
+                featureOverrides:{select:{feature:true,enabled:true}}
+            }
+        }),
+        cuisineId || cuisineName
+            ? prisma.cuisine.findFirst({
+                where:cuisineId ? {id:cuisineId} : {
+                    OR:[
+                        {name:{equals:cuisineName,mode:"insensitive"}},
+                        {slug:String(cuisineName).toUpperCase()}
+                    ]
+                },
+                select:{id:true,name:true,slug:true}
+            })
+            : Promise.resolve(null),
+        prisma.shopItem.findMany({
+            where:{id:{in:uniqueItemIds},active:true,shopId},
+            select:{id:true,pricing:true}
+        })
+    ]);
 
     if(!currentUser || currentUser.isBlocked) throw new apiError(401,"User blocked or unauthorized");
 
-    const shop = await prisma.shop.findUnique({
-        where:{
-            id:shopId
-        },
-        select:{
-            id:true,
-            ownerId:true
-        }
-    });
-
     if(!shop) throw new apiError(404,"shop not found");
+    if((cuisineId || cuisineName) && !cuisine) throw new apiError(404,"cuisine not found");
+    if(comboItemsData.length !== uniqueItemIds.length){
+        throw new apiError(404,"one or more selected items were not found for this shop");
+    }
+    if(!shopHasFeature(shop,"COMBOS")){
+        throw new apiError(403,"combos are not enabled for this shop type");
+    }
+    if(!shopHasFeature(shop,"CATEGORIES") && (categoryId || categoryName)){
+        throw new apiError(403,"categories are not enabled for this shop type");
+    }
+    if(!shopHasFeature(shop,"CUISINE") && (cuisineId || cuisineName)){
+        throw new apiError(403,"cuisine is not enabled for this shop type");
+    }
     if(currentUser.role !== "ADMIN" && shop.ownerId !== currentUser.id){
         throw new apiError(403,"You can only manage combos for your own shop");
-    }
-
-    let cuisine = null;
-    if(cuisineId || cuisineName){
-        cuisine = await prisma.cuisine.findFirst({
-            where:cuisineId ? {
-                id:cuisineId
-            } : {
-                OR:[
-                    {name:{equals:cuisineName,mode:"insensitive"}},
-                    {slug:String(cuisineName).toUpperCase()}
-                ]
-            }
-        });
-
-        if(!cuisine) throw new apiError(404,"cuisine not found");
     }
 
     let category = null;
@@ -159,55 +238,9 @@ const createCombo = asyncHandler(async(req,res)=>{
         }
     }
 
-    const selectedItems = Array.isArray(items) && items.length > 0 ? items : itemIds;
-
-    if(!Array.isArray(selectedItems) || selectedItems.length === 0){
-        throw new apiError(400,"combo items are required");
-    }
-
-    const normalizedItems = selectedItems.map((item)=>{
-        if(typeof item === "string"){
-            return {
-                itemId:item,
-                quantity:1
-            };
-        }
-
-        return {
-            itemId:item.itemId || item.id,
-            quantity:Number(item.quantity ?? 1)
-        };
-    });
-
-    if(normalizedItems.some((item)=>!item.itemId)){
-        throw new apiError(400,"each combo item needs an itemId");
-    }
-
-    if(normalizedItems.some((item)=>!Number.isFinite(item.quantity) || item.quantity < 1)){
-        throw new apiError(400,"combo item quantity must be at least 1");
-    }
-
-    const uniqueItemIds = [...new Set(normalizedItems.map((item)=>String(item.itemId)))];
-    if(uniqueItemIds.length !== normalizedItems.length){
-        throw new apiError(400,"duplicate combo items are not allowed");
-    }
-
-    const comboItemsData = await prisma.shopItem.findMany({
-        where:{
-            id:{
-                in:uniqueItemIds
-            },
-            active:true,
-            shopId
-        }
-    });
-
-    if(comboItemsData.length !== uniqueItemIds.length){
-        throw new apiError(404,"one or more selected items were not found for this shop");
-    }
-
+    const shopItemsById = new Map(comboItemsData.map((item)=>[item.id,item]));
     const comboItems = normalizedItems.map((selectedItem)=>{
-        const item = comboItemsData.find((currentItem)=>currentItem.id === String(selectedItem.itemId));
+        const item = shopItemsById.get(String(selectedItem.itemId));
 
         return {
             item,
@@ -226,74 +259,13 @@ const createCombo = asyncHandler(async(req,res)=>{
         comboItemKey
     ].join("::");
 
-    const existingSameCombo = await prisma.combo.findFirst({
-        where:{
-            shopId,
-            comboKey
-        }
-    });
-
-    if(existingSameCombo){
-        throw new apiError(409,"same combo already exists for this shop");
-    }
-
-    const existingCombosWithSameBase = await prisma.combo.findMany({
-        where:{
-            shopId,
-            name:{
-                equals:name,
-                mode:"insensitive"
-            },
-            cuisineId:cuisine?.id || null,
-            categoryId:category?.id || null
-        },
-        include:{
-            items:{
-                select:{
-                    itemId:true,
-                    quantity:true
-                }
-            }
-        }
-    });
-
-    const duplicateCombo = existingCombosWithSameBase.find((existingCombo)=>{
-        const existingItemKey = existingCombo.items
-            .map((comboItem)=>`${comboItem.itemId}:${comboItem.quantity}`)
-            .sort()
-            .join("|");
-
-        return existingItemKey === comboItemKey;
-    });
-
-    if(duplicateCombo){
-        throw new apiError(409,"same combo already exists for this shop");
-    }
-
-    const calculatedTotalPrice = comboItems.reduce((sum,comboItem)=>{
+    const comboTotalPrice = Math.round(comboItems.reduce((sum,comboItem)=>{
         const itemPrice = Number(comboItem.item.pricing);
         return sum + itemPrice * comboItem.quantity;
-    },0);
-
-    const comboTotalPrice = totalPrice === undefined || totalPrice === null || totalPrice === ""
-        ? Math.round(calculatedTotalPrice)
-        : Number(totalPrice);
-    const comboDiscount = Number(discount ?? 0);
-    const comboPercentageDiscount = Number(percentageDiscount ?? 0);
-    const comboFinalPrice = finalPrice === undefined || finalPrice === null || finalPrice === ""
-        ? Math.max(0,Math.round(comboTotalPrice - comboDiscount - (comboTotalPrice * comboPercentageDiscount / 100)))
-        : Number(finalPrice);
+    },0));
 
     if(!Number.isFinite(comboTotalPrice) || comboTotalPrice < 0){
         throw new apiError(400,"totalPrice must be a valid number");
-    }
-
-    if(!Number.isFinite(comboDiscount) || !Number.isFinite(comboPercentageDiscount) || !Number.isFinite(comboFinalPrice)){
-        throw new apiError(400,"combo pricing must be valid numbers");
-    }
-
-    if(comboDiscount < 0 || comboPercentageDiscount < 0 || comboFinalPrice < 0){
-        throw new apiError(400,"combo pricing cannot be negative");
     }
 
     if(comboItems.some((comboItem)=>{
@@ -303,7 +275,11 @@ const createCombo = asyncHandler(async(req,res)=>{
         throw new apiError(400,"selected item pricing must be valid non-negative numbers");
     }
 
-    const combo = await prisma.combo.create({
+    let combo;
+    try{
+        combo = await prisma.$transaction(async(tx)=>{
+            await reserveShopSlot(tx,shopId);
+            return tx.combo.create({
         data:{
             shopId,
             name,
@@ -311,9 +287,6 @@ const createCombo = asyncHandler(async(req,res)=>{
             description,
             imageUrl,
             totalPrice:comboTotalPrice,
-            discount:comboDiscount,
-            percentageDiscount:comboPercentageDiscount,
-            finalPrice:comboFinalPrice,
             cuisineId:cuisine?.id,
             categoryId:category?.id,
             active:active ?? true,
@@ -326,9 +299,15 @@ const createCombo = asyncHandler(async(req,res)=>{
                 }))
             }
         },
-        include:comboInclude
-    });
+                select:comboMutationSelect
+            });
+        });
+    }catch(error){
+        if(error?.code === "P2002") throw new apiError(409,"same combo already exists for this shop");
+        throw error;
+    }
 
+    await deleteCacheByPattern(`catalog:shop:${shopId}:combos:*`);
     return res.status(201).json(new apiResponse(201,combo,"combo created successfully"));
 });
 
@@ -337,38 +316,29 @@ const editCombo = asyncHandler(async(req,res)=>{
 
     if(!comboId) throw new apiError(400,"combo id is required");
 
-    const existingCombo = await prisma.combo.findUnique({
-        where:{
-            id:comboId
-        },
-        select:{
-            id:true,
-            shopId:true,
-            name:true,
-            cuisineId:true,
-            categoryId:true,
-            totalPrice:true,
-            discount:true,
-            percentageDiscount:true,
-            finalPrice:true
-        }
-    });
+    const [existingCombo,currentUser] = await Promise.all([
+        prisma.combo.findUnique({
+            where:{id:comboId},
+            select:{
+                id:true,
+                shopId:true,
+                name:true,
+                cuisineId:true,
+                categoryId:true,
+                totalPrice:true
+            }
+        }),
+        prisma.user.findUnique({
+            where:{id:req.userData?.id},
+            select:{id:true,role:true,isBlocked:true}
+        })
+    ]);
 
     if(!existingCombo) throw new apiError(404,"combo not found");
 
-    const targetShopId = req.body.shopId || existingCombo.shopId;
-    const currentUser = await prisma.user.findUnique({
-        where:{
-            id:req.userData?.id
-        },
-        select:{
-            id:true,
-            role:true,
-            isBlocked:true
-        }
-    });
-
     if(!currentUser || currentUser.isBlocked) throw new apiError(401,"User blocked or unauthorized");
+
+    const targetShopId = req.body.shopId || existingCombo.shopId;
 
     const shop = await prisma.shop.findUnique({
         where:{
@@ -482,15 +452,17 @@ const editCombo = asyncHandler(async(req,res)=>{
                 },
                 active:true,
                 shopId:targetShopId
-            }
+            },
+            select:{id:true,pricing:true}
         });
 
         if(comboItemsData.length !== uniqueItemIds.length){
             throw new apiError(404,"one or more selected items were not found for this shop");
         }
 
+        const shopItemsById = new Map(comboItemsData.map((item)=>[item.id,item]));
         const comboItems = normalizedItems.map((selectedItem)=>{
-            const item = comboItemsData.find((currentItem)=>currentItem.id === String(selectedItem.itemId));
+            const item = shopItemsById.get(String(selectedItem.itemId));
 
             return {
                 item,
@@ -511,80 +483,13 @@ const editCombo = asyncHandler(async(req,res)=>{
             comboItemKey
         ].join("::");
 
-        const existingSameCombo = await prisma.combo.findFirst({
-            where:{
-                shopId:activeShopId,
-                comboKey,
-                id:{
-                    not:comboId
-                }
-            }
-        });
-
-        if(existingSameCombo){
-            throw new apiError(409,"same combo already exists for this shop");
-        }
-
-        const existingCombosWithSameBase = await prisma.combo.findMany({
-            where:{
-                shopId:activeShopId,
-                id:{
-                    not:comboId
-                },
-                name:{
-                    equals:activeComboName,
-                    mode:"insensitive"
-                },
-                cuisineId:activeCuisineId || null,
-                categoryId:activeCategoryId || null
-            },
-            include:{
-                items:{
-                    select:{
-                        itemId:true,
-                        quantity:true
-                    }
-                }
-            }
-        });
-
-        const duplicateCombo = existingCombosWithSameBase.find((existingCombo)=>{
-            const existingItemKey = existingCombo.items
-                .map((comboItem)=>`${comboItem.itemId}:${comboItem.quantity}`)
-                .sort()
-                .join("|");
-
-            return existingItemKey === comboItemKey;
-        });
-
-        if(duplicateCombo){
-            throw new apiError(409,"same combo already exists for this shop");
-        }
-
-        const calculatedTotalPrice = comboItems.reduce((sum,comboItem)=>{
+        const comboTotalPrice = Math.round(comboItems.reduce((sum,comboItem)=>{
             const itemPrice = Number(comboItem.item.pricing);
             return sum + itemPrice * comboItem.quantity;
-        },0);
-
-        const comboTotalPrice = req.body.totalPrice === undefined || req.body.totalPrice === null || req.body.totalPrice === ""
-            ? Math.round(calculatedTotalPrice)
-            : Number(req.body.totalPrice);
-        const comboDiscount = Number(req.body.discount ?? 0);
-        const comboPercentageDiscount = Number(req.body.percentageDiscount ?? 0);
-        const comboFinalPrice = req.body.finalPrice === undefined || req.body.finalPrice === null || req.body.finalPrice === ""
-            ? Math.max(0,Math.round(comboTotalPrice - comboDiscount - (comboTotalPrice * comboPercentageDiscount / 100)))
-            : Number(req.body.finalPrice);
+        },0));
 
         if(!Number.isFinite(comboTotalPrice) || comboTotalPrice < 0){
             throw new apiError(400,"totalPrice must be a valid number");
-        }
-
-        if(!Number.isFinite(comboDiscount) || !Number.isFinite(comboPercentageDiscount) || !Number.isFinite(comboFinalPrice)){
-            throw new apiError(400,"combo pricing must be valid numbers");
-        }
-
-        if(comboDiscount < 0 || comboPercentageDiscount < 0 || comboFinalPrice < 0){
-            throw new apiError(400,"combo pricing cannot be negative");
         }
 
         if(comboItems.some((comboItem)=>{
@@ -596,9 +501,6 @@ const editCombo = asyncHandler(async(req,res)=>{
 
         dataToUpdate.comboKey = comboKey;
         dataToUpdate.totalPrice = comboTotalPrice;
-        dataToUpdate.discount = comboDiscount;
-        dataToUpdate.percentageDiscount = comboPercentageDiscount;
-        dataToUpdate.finalPrice = comboFinalPrice;
         dataToUpdate.items = {
             deleteMany:{},
             create:comboItems.map((comboItem)=>({
@@ -607,30 +509,6 @@ const editCombo = asyncHandler(async(req,res)=>{
             }))
         };
     }else{
-        if(req.body.totalPrice !== undefined) dataToUpdate.totalPrice = Number(req.body.totalPrice);
-        if(req.body.discount !== undefined) dataToUpdate.discount = Number(req.body.discount);
-        if(req.body.percentageDiscount !== undefined) dataToUpdate.percentageDiscount = Number(req.body.percentageDiscount);
-        if(req.body.finalPrice !== undefined) dataToUpdate.finalPrice = Number(req.body.finalPrice);
-
-        if(req.body.totalPrice !== undefined || req.body.discount !== undefined || req.body.percentageDiscount !== undefined || req.body.finalPrice !== undefined){
-            const activeTotalPrice = dataToUpdate.totalPrice ?? existingCombo.totalPrice;
-            const activeDiscount = dataToUpdate.discount ?? existingCombo.discount;
-            const activePercentageDiscount = dataToUpdate.percentageDiscount ?? existingCombo.percentageDiscount;
-            const activeFinalPrice = req.body.finalPrice === undefined
-                ? Math.max(0,Math.round(activeTotalPrice - activeDiscount - (activeTotalPrice * activePercentageDiscount / 100)))
-                : dataToUpdate.finalPrice;
-
-            if(!Number.isFinite(activeTotalPrice) || !Number.isFinite(activeDiscount) || !Number.isFinite(activePercentageDiscount) || !Number.isFinite(activeFinalPrice)){
-                throw new apiError(400,"combo pricing must be valid numbers");
-            }
-
-            if(activeTotalPrice < 0 || activeDiscount < 0 || activePercentageDiscount < 0 || activeFinalPrice < 0){
-                throw new apiError(400,"combo pricing cannot be negative");
-            }
-
-            dataToUpdate.finalPrice = activeFinalPrice;
-        }
-
         const shouldRebuildComboKey = dataToUpdate.name !== undefined ||
             dataToUpdate.shopId !== undefined ||
             Object.prototype.hasOwnProperty.call(dataToUpdate,"cuisineId") ||
@@ -679,56 +557,6 @@ const editCombo = asyncHandler(async(req,res)=>{
                 comboItemKey
             ].join("::");
 
-            const existingSameCombo = await prisma.combo.findFirst({
-                where:{
-                    shopId:activeShopId,
-                    comboKey,
-                    id:{
-                        not:comboId
-                    }
-                }
-            });
-
-            if(existingSameCombo){
-                throw new apiError(409,"same combo already exists for this shop");
-            }
-
-            const existingCombosWithSameBase = await prisma.combo.findMany({
-                where:{
-                    shopId:activeShopId,
-                    id:{
-                        not:comboId
-                    },
-                    name:{
-                        equals:activeComboName,
-                        mode:"insensitive"
-                    },
-                    cuisineId:activeCuisineId || null,
-                    categoryId:activeCategoryId || null
-                },
-                include:{
-                    items:{
-                        select:{
-                            itemId:true,
-                            quantity:true
-                        }
-                    }
-                }
-            });
-
-            const duplicateCombo = existingCombosWithSameBase.find((existingCombo)=>{
-                const existingItemKey = existingCombo.items
-                    .map((comboItem)=>`${comboItem.itemId}:${comboItem.quantity}`)
-                    .sort()
-                    .join("|");
-
-                return existingItemKey === comboItemKey;
-            });
-
-            if(duplicateCombo){
-                throw new apiError(409,"same combo already exists for this shop");
-            }
-
             dataToUpdate.comboKey = comboKey;
         }
     }
@@ -737,14 +565,24 @@ const editCombo = asyncHandler(async(req,res)=>{
         throw new apiError(400,"no combo data passed");
     }
 
-    const updatedCombo = await prisma.combo.update({
-        where:{
-            id:comboId
-        },
-        data:dataToUpdate,
-        include:comboInclude
-    });
+    let updatedCombo;
+    try{
+        updatedCombo = await prisma.combo.update({
+            where:{id:comboId},
+            data:dataToUpdate,
+            select:comboMutationSelect
+        });
+    }catch(error){
+        if(error?.code === "P2002") throw new apiError(409,"same combo already exists for this shop");
+        throw error;
+    }
 
+    await Promise.all([
+        deleteCacheByPattern(`catalog:shop:${existingCombo.shopId}:combos:*`),
+        targetShopId !== existingCombo.shopId
+            ? deleteCacheByPattern(`catalog:shop:${targetShopId}:combos:*`)
+            : Promise.resolve()
+    ]);
     return res.status(200).json(new apiResponse(200,updatedCombo,"combo updated successfully"));
 });
 
@@ -753,28 +591,18 @@ const deleteCombo = asyncHandler(async(req,res)=>{
 
     if(!comboId) throw new apiError(400,"combo id is required");
 
-    const combo = await prisma.combo.findUnique({
-        where:{
-            id:comboId
-        },
-        select:{
-            id:true,
-            shopId:true
-        }
-    });
+    const [combo,currentUser] = await Promise.all([
+        prisma.combo.findUnique({
+            where:{id:comboId},
+            select:{id:true,shopId:true}
+        }),
+        prisma.user.findUnique({
+            where:{id:req.userData?.id},
+            select:{id:true,role:true,isBlocked:true}
+        })
+    ]);
 
     if(!combo) throw new apiError(404,"combo not found");
-
-    const currentUser = await prisma.user.findUnique({
-        where:{
-            id:req.userData?.id
-        },
-        select:{
-            id:true,
-            role:true,
-            isBlocked:true
-        }
-    });
 
     if(!currentUser || currentUser.isBlocked) throw new apiError(401,"User blocked or unauthorized");
 
@@ -793,51 +621,99 @@ const deleteCombo = asyncHandler(async(req,res)=>{
         throw new apiError(403,"You can only manage combos for your own shop");
     }
 
-    const deletedCombo = await prisma.combo.delete({
-        where:{
-            id:comboId
-        }
+    const deletedCombo = await prisma.$transaction(async(tx)=>{
+        const deleted = await tx.combo.delete({
+            where:{id:comboId},
+            select:{id:true,shopId:true}
+        });
+        await releaseShopSlot(tx,shop.id);
+        return deleted;
     });
 
+    await deleteCacheByPattern(`catalog:shop:${shop.id}:combos:*`);
     return res.status(200).json(new apiResponse(200,deletedCombo,"combo deleted successfully"));
 });
 
 const getCombosByShop = asyncHandler(async(req,res)=>{
     const shopId = req.params.shopId || req.query.shopId;
+    const pagination = getPagination(req.query);
 
     if(!shopId) throw new apiError(400,"shop id is required");
 
-    const shop = await prisma.shop.findUnique({
-        where:{
-            id:shopId
-        },
-        select:{
-            id:true,
-            shopName:true
-        }
-    });
+    const shop = await getOrSetCachedData(`catalog:shop:${shopId}:combos:meta`,()=>{
+        return prisma.shop.findUnique({
+            where:{id:shopId},
+            select:{
+                id:true,
+                shopName:true,
+                shopType:{
+                    select:{
+                        id:true,
+                        name:true,
+                        slug:true,
+                        features:{
+                            where:{enabled:true},
+                            select:{feature:true}
+                        }
+                    }
+                },
+                featureOverrides:{
+                    select:{feature:true,enabled:true}
+                }
+            }
+        });
+    },45);
 
     if(!shop) throw new apiError(404,"shop not found");
+    if(!shopHasFeature(shop,"COMBOS")){
+        throw new apiError(403,"combos are not enabled for this shop type");
+    }
 
-    const combos = await prisma.combo.findMany({
-        where:{
-            shopId
-        },
-        orderBy:[
-            {
-                sortOrderId:"asc"
+    const where = {
+        shopId
+    };
+
+    const cacheKey = `catalog:shop:${shopId}:combos:${pagination.page}:${pagination.limit}`;
+    const responseData = await getOrSetCachedData(cacheKey,async()=>{
+        const [combos,total] = await Promise.all([
+            prisma.combo.findMany({
+                where,
+                orderBy:[
+                    {
+                        sortOrderId:"asc"
+                    },
+                    {
+                        createdAt:"desc"
+                    }
+                ],
+                skip:pagination.skip,
+                take:pagination.take,
+                select:comboListSelect
+            }),
+            prisma.combo.count({ where })
+        ]);
+
+        return {
+            shop:{
+                id:shop.id,
+                shopName:shop.shopName,
+                shopType:shop.shopType ? {
+                    id:shop.shopType.id,
+                    name:shop.shopType.name,
+                    slug:shop.shopType.slug,
+                    features:shop.shopType.features.map((feature)=>feature.feature)
+                } : null
             },
-            {
-                createdAt:"desc"
-            }
-        ],
-        include:comboInclude
-    });
+            pagination:buildPaginationMeta({
+                page:pagination.page,
+                limit:pagination.limit,
+                total
+            }),
+            combos:combos.map(formatComboListItem)
+        };
+    },45);
 
-    return res.status(200).json(new apiResponse(200,{
-        shop,
-        combos
-    },"shop combos fetched successfully"));
+    return res.status(200).json(new apiResponse(200,responseData,"shop combos fetched successfully"));
 });
 
 const fetchCombosByClassification = asyncHandler(async(req,res)=>{
@@ -848,39 +724,37 @@ const fetchCombosByClassification = asyncHandler(async(req,res)=>{
         categoryId,
         categoryName
     } = req.query;
+    const pagination = getPagination(req.query);
 
     if(!shopId) throw new apiError(400,"shop id is required");
     if(!cuisineId && !cuisineName && !categoryId && !categoryName){
         throw new apiError(400,"cuisine or category filter is required");
     }
 
-    const shop = await prisma.shop.findUnique({
-        where:{
-            id:shopId
-        },
-        select:{
-            id:true,
-            shopName:true
-        }
-    });
+    const cuisineLookup = cuisineId || (cuisineName ? String(cuisineName).trim().toLowerCase() : null);
+    const [shop,cuisine] = await Promise.all([
+        getOrSetCachedData(`catalog:shop:${shopId}:combos:classification:meta`,()=>{
+            return prisma.shop.findUnique({
+                where:{id:shopId},
+                select:{id:true,shopName:true}
+            });
+        },45),
+        cuisineLookup
+            ? getOrSetCachedData(`catalog:cuisines:lookup:${cuisineLookup}`,()=>{
+                return prisma.cuisine.findFirst({
+                    where:cuisineId ? {id:cuisineId} : {
+                        OR:[
+                            {name:{equals:cuisineName,mode:"insensitive"}},
+                            {slug:String(cuisineName).toUpperCase()}
+                        ]
+                    }
+                });
+            },120)
+            : Promise.resolve(null)
+    ]);
 
     if(!shop) throw new apiError(404,"shop not found");
-
-    let cuisine = null;
-    if(cuisineId || cuisineName){
-        cuisine = await prisma.cuisine.findFirst({
-            where:cuisineId ? {
-                id:cuisineId
-            } : {
-                OR:[
-                    {name:{equals:cuisineName,mode:"insensitive"}},
-                    {slug:String(cuisineName).toUpperCase()}
-                ]
-            }
-        });
-
-        if(!cuisine) throw new apiError(404,"cuisine not found");
-    }
+    if(cuisineLookup && !cuisine) throw new apiError(404,"cuisine not found");
 
     let category = null;
     if(categoryId || categoryName){
@@ -897,45 +771,63 @@ const fetchCombosByClassification = asyncHandler(async(req,res)=>{
             categoryWhere.cuisineId = cuisine.id;
         }
 
-        category = await prisma.categories.findFirst({
-            where:categoryWhere
-        });
+        const categoryLookup = categoryId || String(categoryName).trim().toLowerCase();
+        category = await getOrSetCachedData(`catalog:categories:lookup:${categoryLookup}:${cuisine?.id || "all"}`,()=>{
+            return prisma.categories.findFirst({where:categoryWhere});
+        },120);
 
         if(!category){
             throw new apiError(404,cuisine?.id ? "category not found for selected cuisine" : "category not found");
         }
     }
 
-    const combos = await prisma.combo.findMany({
-        where:{
-            shopId,
-            active:true,
-            ...(cuisine?.id ? {
-                cuisineId:cuisine.id
-            } : {}),
-            ...(category?.id ? {
-                categoryId:category.id
-            } : {})
-        },
-        orderBy:[
-            {
-                sortOrderId:"asc"
-            },
-            {
-                createdAt:"desc"
-            }
-        ],
-        include:comboInclude
-    });
+    const where = {
+        shopId,
+        active:true,
+        ...(cuisine?.id ? {
+            cuisineId:cuisine.id
+        } : {}),
+        ...(category?.id ? {
+            categoryId:category.id
+        } : {})
+    };
 
-    return res.status(200).json(new apiResponse(200,{
-        shop,
-        selected:{
-            cuisine,
-            category
-        },
-        combos
-    },"filtered combos fetched successfully"));
+    const cacheKey = `catalog:shop:${shopId}:combos:classification:${cuisine?.id || "all-cuisines"}:${category?.id || "all-categories"}:${pagination.page}:${pagination.limit}`;
+    const responseData = await getOrSetCachedData(cacheKey,async()=>{
+        const [combos,total] = await Promise.all([
+            prisma.combo.findMany({
+                where,
+                orderBy:[
+                    {
+                        sortOrderId:"asc"
+                    },
+                    {
+                        createdAt:"desc"
+                    }
+                ],
+                skip:pagination.skip,
+                take:pagination.take,
+                select:comboListSelect
+            }),
+            prisma.combo.count({ where })
+        ]);
+
+        return {
+            shop,
+            selected:{
+                cuisine,
+                category
+            },
+            pagination:buildPaginationMeta({
+                page:pagination.page,
+                limit:pagination.limit,
+                total
+            }),
+            combos:combos.map(formatComboListItem)
+        };
+    },45);
+
+    return res.status(200).json(new apiResponse(200,responseData,"filtered combos fetched successfully"));
 });
 
 const comboBuilder = asyncHandler(async(req,res)=>{
@@ -949,29 +841,18 @@ const comboBuilder = asyncHandler(async(req,res)=>{
 
     if(!shopId) throw new apiError(400,"shop id is required");
 
-    const currentUser = await prisma.user.findUnique({
-        where:{
-            id:req.userData?.id
-        },
-        select:{
-            id:true,
-            role:true,
-            isBlocked:true
-        }
-    });
+    const [currentUser,shop] = await Promise.all([
+        prisma.user.findUnique({
+            where:{id:req.userData?.id},
+            select:{id:true,role:true,isBlocked:true}
+        }),
+        prisma.shop.findUnique({
+            where:{id:shopId},
+            select:{id:true,shopName:true,ownerId:true}
+        })
+    ]);
 
     if(!currentUser || currentUser.isBlocked) throw new apiError(401,"User blocked or unauthorized");
-
-    const shop = await prisma.shop.findUnique({
-        where:{
-            id:shopId
-        },
-        select:{
-            id:true,
-            shopName:true,
-            ownerId:true
-        }
-    });
 
     if(!shop) throw new apiError(404,"shop not found");
     if(currentUser.role !== "ADMIN" && shop.ownerId !== currentUser.id){
@@ -1018,17 +899,16 @@ const comboBuilder = asyncHandler(async(req,res)=>{
         }
     }
 
-    const categories = await prisma.categories.findMany({
-        where:{
-            active:true,
-            ...(cuisine?.id ? {cuisineId:cuisine.id} : {})
-        },
-        orderBy:{
-            sortOrderId:"asc"
-        }
-    });
-
-    const items = await prisma.shopItem.findMany({
+    const [categories,items] = await Promise.all([
+        prisma.categories.findMany({
+            where:{
+                active:true,
+                ...(cuisine?.id ? {cuisineId:cuisine.id} : {})
+            },
+            orderBy:{sortOrderId:"asc"},
+            select:{id:true,name:true,slug:true,cuisineId:true,sortOrderId:true}
+        }),
+        prisma.shopItem.findMany({
         where:{
             active:true,
             shopId,
@@ -1050,7 +930,13 @@ const comboBuilder = asyncHandler(async(req,res)=>{
         orderBy:{
             sortOrderId:"asc"
         },
-        include:{
+        select:{
+            id:true,
+            pricing:true,
+            availableQuantity:true,
+            imageUrl:true,
+            description:true,
+            sortOrderId:true,
             item:{
                 select:{
                     id:true,
@@ -1068,7 +954,8 @@ const comboBuilder = asyncHandler(async(req,res)=>{
                 }
             }
         }
-    });
+        })
+    ]);
 
     return res.status(200).json(new apiResponse(200,{
         selected:{

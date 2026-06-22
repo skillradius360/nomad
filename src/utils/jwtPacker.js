@@ -24,7 +24,7 @@ function encodeRefreshToken(){
 }
 
 function decodeJWT(token,tokenSecret){
-        return jwt.verify(token,tokenSecret)
+        return jwt.verify(token,tokenSecret,{algorithms:["HS256"]})
 }
 
 

@@ -12,6 +12,7 @@ import {
 import { isAdmin, isBuyer, isSeller } from "../middleware/admin.middleware.js";
 import { verifyJWT } from "../middleware/auth.middleware.js";
 import { upload } from "../middleware/multer.middleware.js";
+import { adminHeavyRateLimit, buyerReadRateLimit, expensiveReadRateLimit, uploadRateLimit, writeRateLimit } from "../middleware/rateLimit.middleware.js";
 
 const adRouter = Router();
 
@@ -25,15 +26,15 @@ const adImageUpload = upload.fields([
 ]);
 const buyerAdImageUpload = upload.fields([{ name: "buyerAdImg", maxCount: 1 }]);
 
-adRouter.route("/create").post( adImageUpload, createAd)
-adRouter.route("/seller").get(isSeller, fetchSellerAds);
-adRouter.route("/buyer").get(isBuyer, fetchBuyerAds);
-adRouter.route("/buyer-ads").get(isBuyer, fetchBuyerSideAds);
-adRouter.route("/buyer-ads/admin").post(isAdmin, buyerAdImageUpload, createBuyerAd).get(isAdmin, fetchAllBuyerAdsForAdmin);
-adRouter.route("/buyer-ads/admin/:buyerAdId").get(isAdmin, fetchBuyerAdByIdForAdmin).patch(isAdmin, buyerAdImageUpload, updateBuyerAd).delete(isAdmin, deleteBuyerAd);
-adRouter.route("/buyer-ads/admin/:buyerAdId/active").patch(isAdmin, updateBuyerAdActiveStatus);
-adRouter.route("/:adId/active").patch(isAdmin, updateAdActiveStatus);
-adRouter.route("/:adId").delete(isAdmin, deleteAd);
-adRouter.route("/fetchAll").get(fetchActiveAds);
+adRouter.route("/create").post(uploadRateLimit, adImageUpload, createAd)
+adRouter.route("/seller").get(isSeller, expensiveReadRateLimit, fetchSellerAds);
+adRouter.route("/buyer").get(isBuyer, buyerReadRateLimit, fetchBuyerAds);
+adRouter.route("/buyer-ads").get(isBuyer, buyerReadRateLimit, fetchBuyerSideAds);
+adRouter.route("/buyer-ads/admin").post(isAdmin, uploadRateLimit, buyerAdImageUpload, createBuyerAd).get(isAdmin, adminHeavyRateLimit, fetchAllBuyerAdsForAdmin);
+adRouter.route("/buyer-ads/admin/:buyerAdId").get(isAdmin, fetchBuyerAdByIdForAdmin).patch(isAdmin, uploadRateLimit, buyerAdImageUpload, updateBuyerAd).delete(isAdmin, writeRateLimit, deleteBuyerAd);
+adRouter.route("/buyer-ads/admin/:buyerAdId/active").patch(isAdmin, writeRateLimit, updateBuyerAdActiveStatus);
+adRouter.route("/:adId/active").patch(isAdmin, writeRateLimit, updateAdActiveStatus);
+adRouter.route("/:adId").delete(isAdmin, writeRateLimit, deleteAd);
+adRouter.route("/fetchAll").get(buyerReadRateLimit, fetchActiveAds);
 
 export {adRouter}

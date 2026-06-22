@@ -17,10 +17,13 @@ import { tagRouter } from "./routes/tags.routes.js";
 import { offerRouter } from "./routes/offers.routes.js";
 import { revenueRouter } from "./routes/revenue.routes.js";
 import { bannerRouter } from "./routes/banners.routes.js";
+import { shopTypeRouter } from "./routes/shopTypes.routes.js";
+import { billingRouter } from "./routes/billing.routes.js";
 import { asyncHandler } from "./utils/asyncHandler.js";
-import { verifyJWT } from "./middleware/auth.middleware.js";
-import apiError from "./utils/apiError.js";
+import { startBillingScheduler } from "./utils/billingScheduler.js";
 export const app = express()
+
+app.set("trust proxy",1);
 
 app.use(express.json({
     limit:"16kb"
@@ -38,14 +41,6 @@ const healthCheck = asyncHandler(async (req, res) => {
     })
 })
 
-app.use(express.json());
-app.use((req,res,next,err)=>{
-  res.status(err.statusCode || 500).json({
-    success: false,
-    message: err.message || "Internal Server Error",
-    stack: err.stack || " "
-  });
-})
 app.get("/health",healthCheck)
 
 const corsOptions = {
@@ -60,6 +55,7 @@ app.use(cors(corsOptions));
 app.use("/auth", authRouter);
 app.use("/users", userRouter);
 app.use("/shops", shopRouter);
+app.use("/shop-types", shopTypeRouter);
 app.use("/buyers", buyerRouter);
 app.use("/sellers", sellerRouter);
 app.use("/cuisines", cuisineRouter);
@@ -73,21 +69,22 @@ app.use("/tags", tagRouter);
 app.use("/offers", offerRouter);
 app.use("/revenue", revenueRouter);
 app.use("/banners", bannerRouter);
+app.use("/billing", billingRouter);
 
 app.get("/", (req, res) => {
   const logo = `
-    _   ______  __  ___   ___ _  ____ 
-   / | / / __ \\/  |/  /  /   |  / __ \\
+  _   ______  __  ___   ___ _  ____ 
+  / | / / __ \\/  |/  /  /   |  / __ \\
   /  |/ / / / / /|_/ /   / /| | / / / /
- / /|  / /_/ / /  / /   / ___ |/ /_/ / 
-/_/ |_/\\____/_/  /_/  /__/  |_/_____/  
+  / /|  / /_/ / /  / /   / ___ |/ /_/ / 
+  /_/ |_/\\____/_/  /_/  /__/  |_/_____/  
 `;
 
-  res.send(`
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <style>
+res.send(`
+  <!DOCTYPE html>
+  <html>
+  <head>
+  <style>
         body {
           margin: 0;
           background: black;
@@ -113,6 +110,16 @@ app.get("/", (req, res) => {
     </html>
   `);
 });
+app.use((err,req,res,next)=>{
+  res.status(err.statusCode || 500).json({
+    success:false,
+    message:err.message || "Internal Server Error",
+    stack: err.stack
+  });
+})
+
 app.listen(8000,()=>{
     console.log("this is the express server listening")
-})
+    startBillingScheduler();
+  })
+  

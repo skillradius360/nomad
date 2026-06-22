@@ -1,5 +1,9 @@
 import { prisma } from "../../db/index.js";
 import { asyncHandler,apiError,apiResponse } from "../../utils/handler.js";
+import { getOrSetCachedData } from "../../utils/cache.js";
+import { buildPaginationMeta, getPagination } from "../../utils/pagination.js";
+import { shopHasFeature } from "../../utils/shopFeatures.js";
+import { releaseShopSlot, reserveShopSlot } from "../../utils/billing.js";
 
 const VALID_DAYS = ["MONDAY","TUESDAY","WEDNESDAY","THURSDAY","FRIDAY","SATURDAY","SUNDAY"];
 const SCHEDULE_PRESETS = {
@@ -199,11 +203,31 @@ const createMenu = asyncHandler(async(req,res)=>{
         },
         select:{
             id:true,
-            ownerId:true
+            ownerId:true,
+            shopType:{
+                select:{
+                    features:{
+                        where:{enabled:true},
+                        select:{feature:true}
+                    }
+                }
+            },
+            featureOverrides:{
+                select:{
+                    feature:true,
+                    enabled:true
+                }
+            }
         }
     });
 
     if(!shop) throw new apiError(404,"shop not found");
+    if(!shopHasFeature(shop,"MENUS")){
+        throw new apiError(403,"menus are not enabled for this shop type");
+    }
+    if(!shopHasFeature(shop,"COMBOS") && ((Array.isArray(combos) && combos.length) || (Array.isArray(comboIds) && comboIds.length))){
+        throw new apiError(403,"combos are not enabled for this shop type");
+    }
     if(currentUser.role !== "ADMIN" && shop.ownerId !== currentUser.id){
         throw new apiError(403,"You can only manage menus for your own shop");
     }
@@ -315,7 +339,9 @@ const createMenu = asyncHandler(async(req,res)=>{
         throw new apiError(400,"menu needs at least one item or combo");
     }
 
-    const menu = await prisma.menu.create({
+    const menu = await prisma.$transaction(async(tx)=>{
+        await reserveShopSlot(tx,shopId);
+        return tx.menu.create({
         data:{
             shopId,
             name,
@@ -340,7 +366,7 @@ const createMenu = asyncHandler(async(req,res)=>{
                 }))
             }
         },
-        include:{
+            include:{
             shop:{
                 select:{
                     id:true,
@@ -384,13 +410,13 @@ const createMenu = asyncHandler(async(req,res)=>{
                             name:true,
                             imageUrl:true,
                             totalPrice:true,
-                            finalPrice:true,
                             availableQuantity:true
                         }
                     }
                 }
             }
-        }
+            }
+        });
     });
 
     return res.status(201).json(new apiResponse(201,menu,"menu created successfully"));
@@ -643,7 +669,6 @@ const editMenu = asyncHandler(async(req,res)=>{
                             name:true,
                             imageUrl:true,
                             totalPrice:true,
-                            finalPrice:true,
                             availableQuantity:true
                         }
                     }
@@ -694,10 +719,10 @@ const deleteMenu = asyncHandler(async(req,res)=>{
         throw new apiError(403,"You can only manage menus for your own shop");
     }
 
-    const deletedMenu = await prisma.menu.delete({
-        where:{
-            id:menuId
-        }
+    const deletedMenu = await prisma.$transaction(async(tx)=>{
+        const deleted = await tx.menu.delete({where:{id:menuId}});
+        await releaseShopSlot(tx,menu.shop.id);
+        return deleted;
     });
 
     return res.status(200).json(new apiResponse(200,deletedMenu,"menu deleted successfully"));
@@ -778,6 +803,7 @@ const reorderMenus = asyncHandler(async(req,res)=>{
 
 const fetchRunningMenusByShop = asyncHandler(async(req,res)=>{
     const shopId = req.params.shopId || req.query.shopId;
+    const pagination = getPagination(req.query,{defaultLimit:10,maxLimit:30});
 
     if(!shopId) throw new apiError(400,"shop id is required");
 
@@ -788,11 +814,31 @@ const fetchRunningMenusByShop = asyncHandler(async(req,res)=>{
         select:{
             id:true,
             shopName:true,
-            ownerId:true
+            ownerId:true,
+            shopType:{
+                select:{
+                    id:true,
+                    name:true,
+                    slug:true,
+                    features:{
+                        where:{enabled:true},
+                        select:{feature:true}
+                    }
+                }
+            },
+            featureOverrides:{
+                select:{
+                    feature:true,
+                    enabled:true
+                }
+            }
         }
     });
 
     if(!shop) throw new apiError(404,"shop not found");
+    if(!shopHasFeature(shop,"MENUS")){
+        throw new apiError(403,"menus are not enabled for this shop type");
+    }
 
     const {
         dayOfWeek,
@@ -800,7 +846,9 @@ const fetchRunningMenusByShop = asyncHandler(async(req,res)=>{
         currentMinute
     } = getCurrentMenuWindow(req.query);
 
-    const menus = await prisma.menu.findMany({
+    const cacheKey = `catalog:shop:${shopId}:running-menus:${dayOfWeek}:${currentMinute}:${pagination.page}:${pagination.limit}`;
+    const responseData = await getOrSetCachedData(cacheKey,async()=>{
+        const menus = await prisma.menu.findMany({
         where:{
             shopId,
             active:true,
@@ -881,7 +929,6 @@ const fetchRunningMenusByShop = asyncHandler(async(req,res)=>{
                             name:true,
                             imageUrl:true,
                             totalPrice:true,
-                            finalPrice:true,
                             availableQuantity:true
                         }
                     }
@@ -896,22 +943,75 @@ const fetchRunningMenusByShop = asyncHandler(async(req,res)=>{
                 createdAt:"asc"
             }
         ]
-    });
+        });
 
-    const runningMenus = menus.filter((menu)=>
-        menu.schedules.some((schedule)=>
-            isScheduleRunningNow(schedule,dayOfWeek,previousDay,currentMinute)
-        )
-    );
+        const runningMenus = menus.filter((menu)=>
+            menu.schedules.some((schedule)=>
+                isScheduleRunningNow(schedule,dayOfWeek,previousDay,currentMinute)
+            )
+        );
 
-    return res.status(200).json(new apiResponse(200,{
-        shop,
-        current:{
-            dayOfWeek,
-            currentMinute
-        },
-        menus:runningMenus
-    },"running menus fetched successfully"));
+        const paginatedMenus = runningMenus.slice(pagination.skip,pagination.skip + pagination.limit);
+        return {
+            shop:{
+                id:shop.id,
+                shopName:shop.shopName,
+                ownerId:shop.ownerId,
+                shopType:shop.shopType ? {
+                    id:shop.shopType.id,
+                    name:shop.shopType.name,
+                    slug:shop.shopType.slug,
+                    features:shop.shopType.features.map((feature)=>feature.feature)
+                } : null
+            },
+            current:{
+                dayOfWeek,
+                currentMinute
+            },
+            pagination:buildPaginationMeta({
+                page:pagination.page,
+                limit:pagination.limit,
+                total:runningMenus.length
+            }),
+            menus:paginatedMenus.map((menu)=>({
+                id:menu.id,
+                shopId:menu.shopId,
+                name:menu.name,
+                description:menu.description,
+                active:menu.active,
+                sortOrderId:menu.sortOrderId,
+                schedules:menu.schedules.map((schedule)=>({
+                    id:schedule.id,
+                    dayOfWeek:schedule.dayOfWeek,
+                    startMinute:schedule.startMinute,
+                    endMinute:schedule.endMinute
+                })),
+                items:menu.items.map((menuItem)=>({
+                    id:menuItem.item?.id,
+                    menuItemId:menuItem.id,
+                    itemId:menuItem.item?.item?.id,
+                    name:menuItem.item?.item?.name,
+                    pricing:menuItem.item?.pricing,
+                    availableQuantity:menuItem.item?.availableQuantity,
+                    imageUrl:menuItem.item?.imageUrl || menuItem.item?.item?.imageUrl || null,
+                    description:menuItem.item?.description,
+                    sortOrderId:menuItem.sortOrderId,
+                    categoryId:menuItem.item?.item?.categoryId || null
+                })),
+                combos:menu.combos.map((menuCombo)=>({
+                    id:menuCombo.combo?.id,
+                    menuComboId:menuCombo.id,
+                    name:menuCombo.combo?.name,
+                    imageUrl:menuCombo.combo?.imageUrl,
+                    totalPrice:menuCombo.combo?.totalPrice,
+                    availableQuantity:menuCombo.combo?.availableQuantity,
+                    sortOrderId:menuCombo.sortOrderId
+                }))
+            }))
+        };
+    },30);
+
+    return res.status(200).json(new apiResponse(200,responseData,"running menus fetched successfully"));
 });
 
 export { createMenu, editMenu, deleteMenu, reorderMenus, fetchRunningMenusByShop };

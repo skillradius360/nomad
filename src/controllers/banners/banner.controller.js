@@ -1,6 +1,16 @@
 import { prisma } from "../../db/index.js";
 import { cloudUploader } from "../../utils/cloudinary.upload.js";
+import { deleteCacheByPattern, getOrSetCachedData } from "../../utils/cache.js";
 import { apiError, apiResponse, asyncHandler } from "../../utils/handler.js";
+
+const BANNER_CACHE_TTL = 60;
+const invalidateBannerCaches = async(shopId)=>{
+    if(shopId){
+        await deleteCacheByPattern(`buyer:shop:${shopId}:banners`);
+        return;
+    }
+    await deleteCacheByPattern("buyer:shop:*:banners");
+};
 
 const bannerInclude = {
     shop:{
@@ -121,6 +131,7 @@ const createBanner = asyncHandler(async(req,res)=>{
         include:bannerInclude
     })));
 
+    await Promise.all(selectedShopIds.map((selectedShopId)=>invalidateBannerCaches(selectedShopId)));
     return res.status(201).json(new apiResponse(201,selectedShopIds.length === 1 ? banners[0] : banners,"banner created successfully"));
 });
 
@@ -128,26 +139,36 @@ const fetchPublishedBannersByShop = asyncHandler(async(req,res)=>{
     const { shopId } = req.params;
     if(!shopId) throw new apiError(400,"shop id is required");
 
-    const shop = await prisma.shop.findUnique({
-        where:{
-            id:shopId
-        },
-        select:{
-            id:true
-        }
-    });
-    if(!shop) throw new apiError(404,"shop not found");
+    const cacheKey = `buyer:shop:${shopId}:banners`;
+    const banners = await getOrSetCachedData(cacheKey,async()=>{
+        const shop = await prisma.shop.findUnique({
+            where:{
+                id:shopId
+            },
+            select:{
+                id:true
+            }
+        });
+        if(!shop) throw new apiError(404,"shop not found");
 
-    const banners = await prisma.banner.findMany({
-        where:{
-            shopId,
-            active:true
-        },
-        include:bannerInclude,
-        orderBy:{
-            createdAt:"desc"
-        }
-    });
+        return prisma.banner.findMany({
+            where:{
+                shopId,
+                active:true
+            },
+            select:{
+                id:true,
+                shopId:true,
+                text:true,
+                imageUrl:true,
+                active:true,
+                createdAt:true
+            },
+            orderBy:{
+                createdAt:"desc"
+            }
+        });
+    },BANNER_CACHE_TTL);
 
     return res.status(200).json(new apiResponse(200,banners,"published banners fetched successfully"));
 });
@@ -224,6 +245,7 @@ const updateBanner = asyncHandler(async(req,res)=>{
         include:bannerInclude
     });
 
+    await invalidateBannerCaches(existingBanner.shop.id);
     return res.status(200).json(new apiResponse(200,banner,"banner updated successfully"));
 });
 
@@ -264,6 +286,7 @@ const updateBannerPublishStatus = asyncHandler(async(req,res)=>{
         include:bannerInclude
     });
 
+    await invalidateBannerCaches(existingBanner.shop.id);
     return res.status(200).json(new apiResponse(200,banner,`banner ${active ? "published" : "unpublished"} successfully`));
 });
 
@@ -298,6 +321,7 @@ const deleteBanner = asyncHandler(async(req,res)=>{
         }
     });
 
+    await invalidateBannerCaches(existingBanner.shop.id);
     return res.status(200).json(new apiResponse(200,banner,"banner deleted successfully"));
 });
 

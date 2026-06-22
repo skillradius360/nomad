@@ -1,6 +1,8 @@
 import { prisma } from "../../db/index.js";
 import { cloudUploader } from "../../utils/cloudinary.upload.js";
+import { getOrSetCachedData } from "../../utils/cache.js";
 import { apiError, apiResponse, asyncHandler } from "../../utils/handler.js";
+import { buildPaginationMeta, getPagination } from "../../utils/pagination.js";
 
 const offerInclude = {
     shop:{
@@ -54,8 +56,7 @@ const offerInclude = {
                     id:true,
                     name:true,
                     imageUrl:true,
-                    totalPrice:true,
-                    finalPrice:true
+                    totalPrice:true
                 }
             }
         }
@@ -90,6 +91,104 @@ const offerInclude = {
 };
 
 const isTruthyInput = (value)=> value === true || String(value).toLowerCase() === "true";
+
+const formatOfferListItem = (offer)=>({
+    id:offer.id,
+    shopId:offer.shopId,
+    title:offer.title,
+    description:offer.description,
+    offerType:offer.offerType,
+    active:offer.active,
+    startsAt:offer.startsAt,
+    endsAt:offer.endsAt,
+    menuScope:offer.menuScope,
+    applyTo:offer.applyTo,
+    audienceType:offer.audienceType,
+    stackingMode:offer.stackingMode,
+    minQuantity:offer.minQuantity,
+    minOrderAmount:offer.minOrderAmount,
+    discountType:offer.discountType,
+    discountValue:offer.discountValue,
+    maxDiscountAmount:offer.maxDiscountAmount,
+    rewardQuantity:offer.rewardQuantity,
+    imageUrl:offer.imageUrl,
+    createdAt:offer.createdAt,
+    updatedAt:offer.updatedAt,
+    shop:offer.shop ? {
+        id:offer.shop.id,
+        shopName:offer.shop.shopName,
+        ownerId:offer.shop.ownerId
+    } : null,
+    menus:offer.menus?.map((menu)=>({
+        id:menu.menuId,
+        name:menu.menu?.name,
+        active:menu.menu?.active
+    })) || [],
+    items:offer.items?.map((item)=>({
+        id:item.shopItemId,
+        role:item.role,
+        pricing:item.shopItem?.pricing,
+        imageUrl:item.shopItem?.imageUrl || item.shopItem?.item?.imageUrl || null,
+        name:item.shopItem?.item?.name
+    })) || [],
+    combos:offer.combos?.map((combo)=>({
+        id:combo.comboId,
+        role:combo.role,
+        name:combo.combo?.name,
+        imageUrl:combo.combo?.imageUrl,
+        totalPrice:combo.combo?.totalPrice
+    })) || [],
+    buyers:offer.buyers?.map((buyer)=>({
+        id:buyer.buyerId,
+        name:buyer.buyer?.name,
+        phone:buyer.buyer?.phone,
+        email:buyer.buyer?.email
+    })) || [],
+    tags:offer.tags?.map((tag)=>tag.tag) || []
+});
+
+const formatAvailableOfferListItem = (offer)=>({
+    id:offer.id,
+    shopId:offer.shopId,
+    title:offer.title,
+    description:offer.description,
+    offerType:offer.offerType,
+    startsAt:offer.startsAt,
+    endsAt:offer.endsAt,
+    menuScope:offer.menuScope,
+    applyTo:offer.applyTo,
+    audienceType:offer.audienceType,
+    stackingMode:offer.stackingMode,
+    minQuantity:offer.minQuantity,
+    minOrderAmount:offer.minOrderAmount,
+    discountType:offer.discountType,
+    discountValue:offer.discountValue,
+    maxDiscountAmount:offer.maxDiscountAmount,
+    rewardQuantity:offer.rewardQuantity,
+    imageUrl:offer.imageUrl,
+    menus:offer.menus?.map((menu)=>({
+        id:menu.menuId,
+        name:menu.menu?.name
+    })) || [],
+    items:offer.items?.map((item)=>({
+        id:item.shopItemId,
+        role:item.role,
+        name:item.shopItem?.item?.name,
+        pricing:item.shopItem?.pricing,
+        imageUrl:item.shopItem?.imageUrl || item.shopItem?.item?.imageUrl || null
+    })) || [],
+    combos:offer.combos?.map((combo)=>({
+        id:combo.comboId,
+        role:combo.role,
+        name:combo.combo?.name,
+        imageUrl:combo.combo?.imageUrl,
+        totalPrice:combo.combo?.totalPrice
+    })) || [],
+    tags:offer.tags?.map((tag)=>({
+        id:tag.tag?.id,
+        name:tag.tag?.name
+    })) || []
+});
 
 const getFirstOrderDiscountFields = (body)=>{
     const firstOrderDiscountValue = body.firstOrderDiscountValue ?? body.firstPurchaseDiscountValue ?? body.firstTimeBuyerDiscountValue;
@@ -380,6 +479,7 @@ const createOffer = asyncHandler(async(req,res)=>{
 
 const fetchOffersByShop = asyncHandler(async(req,res)=>{
     const { shopId } = req.params;
+    const pagination = getPagination(req.query);
 
     if(!shopId) throw new apiError(400,"shop id is required");
 
@@ -409,17 +509,31 @@ const fetchOffersByShop = asyncHandler(async(req,res)=>{
     if(!shop) throw new apiError(404,"shop not found");
     if(currentUser.role === "SELLER" && shop.ownerId !== currentUser.id) throw new apiError(403,"You can only fetch offers for your own shop");
 
-    const offers = await prisma.offer.findMany({
-        where:{
-            shopId:shop.id
-        },
-        include:offerInclude,
-        orderBy:{
-            createdAt:"desc"
-        }
-    });
+    const where = {
+        shopId:shop.id
+    };
 
-    return res.status(200).json(new apiResponse(200,offers,"shop offers fetched successfully"));
+    const [offers,total] = await Promise.all([
+        prisma.offer.findMany({
+            where,
+            include:offerInclude,
+            orderBy:{
+                createdAt:"desc"
+            },
+            skip:pagination.skip,
+            take:pagination.take
+        }),
+        prisma.offer.count({ where })
+    ]);
+
+    return res.status(200).json(new apiResponse(200,{
+        pagination:buildPaginationMeta({
+            page:pagination.page,
+            limit:pagination.limit,
+            total
+        }),
+        offers:offers.map(formatOfferListItem)
+    },"shop offers fetched successfully"));
 });
 
 const fetchOfferById = asyncHandler(async(req,res)=>{
@@ -850,6 +964,7 @@ const deleteOffer = asyncHandler(async(req,res)=>{
 
 const fetchAvailableOffersByShop = asyncHandler(async(req,res)=>{
     const { shopId } = req.params;
+    const pagination = getPagination(req.query);
 
     if(!shopId) throw new apiError(400,"shop id is required");
 
@@ -867,49 +982,65 @@ const fetchAvailableOffersByShop = asyncHandler(async(req,res)=>{
 
     if(!currentUser || currentUser.isBlocked) throw new apiError(401,"User blocked or unauthorized");
 
-    const now = new Date();
-    const offers = await prisma.offer.findMany({
-        where:{
-            shopId,
-            active:true,
-            startsAt:{
-                lte:now
-            },
-            endsAt:{
-                gte:now
-            }
-        },
-        include:offerInclude,
-        orderBy:{
-            createdAt:"desc"
-        }
-    });
+    const cacheKey = `buyer:${currentUser.id}:shop:${shopId}:available-offers:${pagination.page}:${pagination.limit}`;
+    const responseData = await getOrSetCachedData(cacheKey,async()=>{
+        const now = new Date();
+        const [offers,completedOffer] = await Promise.all([
+            prisma.offer.findMany({
+                where:{
+                    shopId,
+                    active:true,
+                    startsAt:{
+                        lte:now
+                    },
+                    endsAt:{
+                        gte:now
+                    }
+                },
+                include:offerInclude,
+                orderBy:{
+                    createdAt:"desc"
+                }
+            }),
+            prisma.buyerCompletedOffer.findFirst({
+                where:{
+                    buyerId:currentUser.id,
+                    shopId
+                },
+                select:{
+                    id:true
+                }
+            })
+        ]);
 
-    const completedOffer = await prisma.buyerCompletedOffer.findFirst({
-        where:{
-            buyerId:currentUser.id,
-            shopId
-        },
-        select:{
-            id:true
-        }
-    });
+        const availableOffers = offers.filter((offer)=>{
+            if(offer.audienceType === "ALL_BUYERS") return true;
+            if(offer.audienceType === "SPECIFIC_BUYERS") return offer.buyers.some((buyer)=>buyer.buyerId === currentUser.id);
+            if(offer.audienceType === "PREMIUM_CUSTOMERS") return currentUser.billingPlan === "ACTIVE";
+            if(offer.audienceType === "NEW_CUSTOMERS") return !completedOffer;
+            if(offer.audienceType === "TAG_BASED") return false;
+            return false;
+        });
 
-    const availableOffers = offers.filter((offer)=>{
-        if(offer.audienceType === "ALL_BUYERS") return true;
-        if(offer.audienceType === "SPECIFIC_BUYERS") return offer.buyers.some((buyer)=>buyer.buyerId === currentUser.id);
-        if(offer.audienceType === "PREMIUM_CUSTOMERS") return currentUser.billingPlan === "ACTIVE";
-        if(offer.audienceType === "NEW_CUSTOMERS") return !completedOffer;
-        if(offer.audienceType === "TAG_BASED") return false;
-        return false;
-    });
+        const pagedOffers = availableOffers.slice(pagination.skip,pagination.skip + pagination.take);
 
-    return res.status(200).json(new apiResponse(200,availableOffers,"available offers fetched successfully"));
+        return {
+            pagination:buildPaginationMeta({
+                page:pagination.page,
+                limit:pagination.limit,
+                total:availableOffers.length
+            }),
+            offers:pagedOffers.map(formatAvailableOfferListItem)
+        };
+    },30);
+
+    return res.status(200).json(new apiResponse(200,responseData,"available offers fetched successfully"));
 });
 
 const searchBuyersForOfferTarget = asyncHandler(async(req,res)=>{
     const { shopId } = req.params;
     const { query } = req.query;
+    const pagination = getPagination(req.query,{defaultLimit:25,maxLimit:50});
 
     if(!shopId) throw new apiError(400,"shop id is required");
 
@@ -941,56 +1072,62 @@ const searchBuyersForOfferTarget = asyncHandler(async(req,res)=>{
     if(currentUser.role === "SELLER" && shop.ownerId !== currentUser.id) throw new apiError(403,"You can only search buyers for your own shop");
 
     const searchText = query ? String(query).trim() : "";
-    const buyers = await prisma.user.findMany({
-        where:{
-            role:"BUYER",
-            ...(searchText ? {
-                OR:[
-                    {
-                        name:{
-                            contains:searchText,
-                            mode:"insensitive"
-                        }
-                    },
-                    {
-                        phone:{
-                            contains:searchText
-                        }
-                    },
-                    {
-                        email:{
-                            contains:searchText,
-                            mode:"insensitive"
-                        }
+    const where = {
+        role:"BUYER",
+        ...(searchText ? {
+            OR:[
+                {
+                    name:{
+                        contains:searchText,
+                        mode:"insensitive"
                     }
-                ]
-            } : {})
-        },
-        select:{
-            id:true,
-            name:true,
-            phone:true,
-            email:true,
-            billingPlan:true,
-            completedOffers:{
-                where:{
-                    shopId:shop.id
                 },
-                select:{
-                    id:true,
-                    totalAmount:true,
-                    completedAt:true
+                {
+                    phone:{
+                        contains:searchText
+                    }
                 },
-                orderBy:{
-                    completedAt:"desc"
+                {
+                    email:{
+                        contains:searchText,
+                        mode:"insensitive"
+                    }
                 }
+            ]
+        } : {})
+    };
+
+    const [buyers,total] = await Promise.all([
+        prisma.user.findMany({
+            where,
+            select:{
+                id:true,
+                name:true,
+                phone:true,
+                email:true,
+                billingPlan:true,
+                completedOffers:{
+                    where:{
+                        shopId:shop.id
+                    },
+                    select:{
+                        id:true,
+                        totalAmount:true,
+                        completedAt:true
+                    },
+                    orderBy:{
+                        completedAt:"desc"
+                    }
+                }
+            },
+            skip:pagination.skip,
+            take:pagination.take,
+            orderBy:{
+                createdAt:"desc"
             }
-        },
-        take:25,
-        orderBy:{
-            createdAt:"desc"
-        }
-    });
+        }),
+        prisma.user.count({ where })
+    ]);
 
     if (!buyers) throw new apiError(400, "")
 
@@ -1005,7 +1142,14 @@ const searchBuyersForOfferTarget = asyncHandler(async(req,res)=>{
         lastCompletedOrderAtShop:buyer.completedOffers[0]?.completedAt || null
     }));
 
-    return res.status(200).json(new apiResponse(200,responseBuyers,"buyers fetched successfully"));
+    return res.status(200).json(new apiResponse(200,{
+        pagination:buildPaginationMeta({
+            page:pagination.page,
+            limit:pagination.limit,
+            total
+        }),
+        buyers:responseBuyers
+    },"buyers fetched successfully"));
 });
 
 export {

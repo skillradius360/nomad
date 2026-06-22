@@ -1,7 +1,24 @@
 import { prisma } from "../../db/index.js";
 import { asyncHandler, apiError, apiResponse } from "../../utils/handler.js";
+import { buildPaginationMeta, getPagination } from "../../utils/pagination.js";
+import { randomUUID } from "node:crypto";
+import { calculateBpsAmount, getBillingSettings } from "../../utils/billing.js";
 
 const VALID_PAYMENT_METHODS = ["CASH","CARD","UPI"];
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+const requireValidOrderId = (orderId)=>{
+    if(typeof orderId !== "string" || !UUID_PATTERN.test(orderId)){
+        throw new apiError(400,"valid order id is required");
+    }
+};
+
+const serializeInventoryUsage = (rows)=>JSON.stringify(rows.map((row)=>(
+    {
+        id:String(row.id),
+        quantity:Number(row.quantity)
+    }
+)));
 
 const orderInventoryInclude = {
     shop:{
@@ -61,33 +78,135 @@ const orderInventoryInclude = {
     }
 };
 
-const orderResponseInclude = {
+const orderItemSelect = {
+    id:true,
+    orderItemType:true,
+    shopItemId:true,
+    comboId:true,
+    name:true,
+    quantity:true,
+    priceAtOrderTime:true,
+    totalPrice:true
+};
+
+const orderListSelect = {
+    id:true,
+    shopId:true,
+    currentOrderStatus:true,
+    paymentMethod:true,
+    paymentReceived:true,
+    subtotalAmount:true,
+    discountAmount:true,
+    deliveryAmount:true,
+    deliveryDiscountAmount:true,
+    totalAmount:true,
+    customerNote:true,
+    createdAt:true,
+    shop:{
+        select:{
+            id:true,
+            shopName:true
+        }
+    },
+    orderItems:{
+        select:orderItemSelect
+    }
+};
+
+const sellerOrderListSelect = {
+    ...orderListSelect,
     user:{
         select:{
             id:true,
             name:true,
             phone:true
         }
-    },
-    shop:{
-        select:{
-            id:true,
-            shopName:true,
-            ownerId:true
-        }
-    },
-    orderItems:{
-        select:{
-            id:true,
-            orderItemType:true,
-            shopItemId:true,
-            comboId:true,
-            name:true,
-            quantity:true,
-            priceAtOrderTime:true,
-            totalPrice:true
-        }
     }
+};
+
+const createdOrderSelect = {
+    id:true,
+    currentOrderStatus:true,
+    paymentMethod:true,
+    paymentReceived:true,
+    subtotalAmount:true,
+    discountAmount:true,
+    deliveryAmount:true,
+    deliveryDiscountAmount:true,
+    totalAmount:true,
+    customerNote:true,
+    createdAt:true,
+    orderItems:{
+        select:orderItemSelect
+    }
+};
+
+const orderMutationSelect = {
+    id:true,
+    currentOrderStatus:true,
+    paymentReceived:true,
+    paidAmount:true,
+    refundAmount:true
+};
+
+const applyRevenueDeltas = async(tx,rows)=>{
+    if(rows.length === 0) return;
+
+    const revenueRows = rows.map((row)=>({
+        id:randomUUID(),
+        shopId:String(row.shopId),
+        periodType:String(row.periodType),
+        periodDate:row.periodDate.toISOString(),
+        successfulOrders:Number(row.successfulOrders),
+        cancelledOrders:Number(row.cancelledOrders),
+        grossRevenue:Number(row.grossRevenue),
+        discountAmount:Number(row.discountAmount),
+        deliveryRevenue:Number(row.deliveryRevenue),
+        refundAmount:Number(row.refundAmount),
+        netRevenue:Number(row.netRevenue)
+    }));
+
+    await tx.$executeRaw`
+        INSERT INTO "ShopRevenueSummary" (
+            "id","shopId","periodType","periodDate","successfulOrders","cancelledOrders",
+            "grossRevenue","discountAmount","deliveryRevenue","refundAmount","netRevenue","updatedAt"
+        )
+        SELECT
+            revenue."id",
+            revenue."shopId",
+            revenue."periodType"::"RevenuePeriodType",
+            (revenue."periodDate"::timestamptz AT TIME ZONE 'UTC'),
+            revenue."successfulOrders",
+            revenue."cancelledOrders",
+            revenue."grossRevenue",
+            revenue."discountAmount",
+            revenue."deliveryRevenue",
+            revenue."refundAmount",
+            revenue."netRevenue",
+            CURRENT_TIMESTAMP
+        FROM jsonb_to_recordset(${JSON.stringify(revenueRows)}::jsonb) AS revenue(
+            "id" text,
+            "shopId" text,
+            "periodType" text,
+            "periodDate" text,
+            "successfulOrders" integer,
+            "cancelledOrders" integer,
+            "grossRevenue" integer,
+            "discountAmount" integer,
+            "deliveryRevenue" integer,
+            "refundAmount" integer,
+            "netRevenue" integer
+        )
+        ON CONFLICT ("shopId","periodType","periodDate") DO UPDATE SET
+            "successfulOrders" = "ShopRevenueSummary"."successfulOrders" + EXCLUDED."successfulOrders",
+            "cancelledOrders" = "ShopRevenueSummary"."cancelledOrders" + EXCLUDED."cancelledOrders",
+            "grossRevenue" = "ShopRevenueSummary"."grossRevenue" + EXCLUDED."grossRevenue",
+            "discountAmount" = "ShopRevenueSummary"."discountAmount" + EXCLUDED."discountAmount",
+            "deliveryRevenue" = "ShopRevenueSummary"."deliveryRevenue" + EXCLUDED."deliveryRevenue",
+            "refundAmount" = "ShopRevenueSummary"."refundAmount" + EXCLUDED."refundAmount",
+            "netRevenue" = "ShopRevenueSummary"."netRevenue" + EXCLUDED."netRevenue",
+            "updatedAt" = CURRENT_TIMESTAMP
+    `;
 };
 
 const addInventoryUsage = (usageMap, inventoryItem, quantity, name)=>{
@@ -106,6 +225,15 @@ const addInventoryUsage = (usageMap, inventoryItem, quantity, name)=>{
         availableQuantity:inventoryItem.availableQuantity
     });
 };
+
+const groupOfferSelections = (selections,idKey)=>selections.reduce((groups,selection)=>{
+    groups[selection.role]?.push(selection[idKey]);
+    return groups;
+},{
+    APPLIES_TO:[],
+    CUSTOMER_BUYS:[],
+    CUSTOMER_GETS:[]
+});
 
 const getOrderInventoryUsage = (order)=>{
     const shopItemUsage = new Map();
@@ -142,6 +270,40 @@ const getOrderInventoryUsage = (order)=>{
     };
 };
 
+const formatOrderListItem = (order)=>({
+    id:order.id,
+    ...(order.user ? {
+        buyer:{
+            id:order.user.id,
+            name:order.user.name,
+            phone:order.user.phone
+        }
+    } : {}),
+    shopId:order.shopId,
+    shopName:order.shop?.shopName || null,
+    currentOrderStatus:order.currentOrderStatus,
+    paymentMethod:order.paymentMethod,
+    paymentReceived:order.paymentReceived,
+    subtotalAmount:order.subtotalAmount,
+    discountAmount:order.discountAmount,
+    deliveryAmount:order.deliveryAmount,
+    deliveryDiscountAmount:order.deliveryDiscountAmount,
+    totalAmount:order.totalAmount,
+    customerNote:order.customerNote,
+    createdAt:order.createdAt,
+    items:order.orderItems?.map((item)=>({
+        id:item.id,
+        type:item.orderItemType,
+        itemId:item.shopItemId || item.comboId,
+        shopItemId:item.shopItemId,
+        comboId:item.comboId,
+        name:item.name,
+        quantity:item.quantity,
+        price:item.priceAtOrderTime,
+        totalPrice:item.totalPrice
+    })) || []
+});
+
 const createOrder = asyncHandler(async(req,res)=>{
     const {
         shopId,
@@ -165,35 +327,6 @@ const createOrder = asyncHandler(async(req,res)=>{
     if(!VALID_PAYMENT_METHODS.includes(normalizedPaymentMethod)){
         throw new apiError(400,"paymentMethod must be one of CASH, CARD, or UPI");
     }
-
-    const currentUser = await prisma.user.findUnique({
-        where:{
-            id:req.userData?.id
-        },
-        select:{
-            id:true,
-            role:true,
-            isBlocked:true
-        }
-    });
-
-    if(!currentUser || currentUser.isBlocked) throw new apiError(401,"User blocked or unauthorized");
-    if(currentUser.role !== "BUYER") throw new apiError(403,"Buyer access required");
-
-    const shop = await prisma.shop.findUnique({
-        where:{
-            id:shopId
-        },
-        select:{
-            id:true,
-            shopName:true,
-            ownerId:true,
-            ShopOpenStatus:true,
-            Verified:true
-        }
-    });
-
-    if(!shop) throw new apiError(404,"shop not found");
 
     const selectedItems = Array.isArray(items) && items.length > 0 ? items : itemIds;
     const selectedCombos = Array.isArray(combos) && combos.length > 0 ? combos : comboIds;
@@ -261,69 +394,192 @@ const createOrder = asyncHandler(async(req,res)=>{
         throw new apiError(400,"duplicate order combos are not allowed");
     }
 
-    const shopItemsData = uniqueShopItemIds.length > 0
-        ? await prisma.shopItem.findMany({
-            where:{
-                id:{
-                    in:uniqueShopItemIds
-                },
-                shopId,
-                active:true
-            },
-            include:{
-                item:{
-                    select:{
-                        id:true,
-                        name:true
-                    }
-                }
+    const rawOfferInput = appliedOfferIds ?? offerIds ?? offerId;
+    let selectedOfferIds = [];
+    if(Array.isArray(rawOfferInput)){
+        selectedOfferIds = rawOfferInput.map(String).filter(Boolean);
+    }else if(typeof rawOfferInput === "string" && rawOfferInput.trim()){
+        const trimmedOfferInput = rawOfferInput.trim();
+        if(trimmedOfferInput.startsWith("[")){
+            try{
+                const parsedOfferIds = JSON.parse(trimmedOfferInput);
+                if(!Array.isArray(parsedOfferIds)) throw new Error("offer ids must be an array");
+                selectedOfferIds = parsedOfferIds.map(String).filter(Boolean);
+            }catch{
+                throw new apiError(400,"offer ids must be a valid JSON array");
             }
-        })
-        : [];
-
-    if(shopItemsData.length !== uniqueShopItemIds.length){
-        throw new apiError(400,"one or more items are invalid for this shop");
+        }else{
+            selectedOfferIds = [trimmedOfferInput];
+        }
+    }else if(rawOfferInput){
+        selectedOfferIds = [String(rawOfferInput)];
     }
 
-    const combosData = uniqueComboIds.length > 0
-        ? await prisma.combo.findMany({
+    if(new Set(selectedOfferIds).size !== selectedOfferIds.length){
+        throw new apiError(400,"duplicate offer ids are not allowed");
+    }
+
+    const now = new Date();
+    const [currentUser,shop,shopItemsData,combosData,offersData,completedOffer] = await Promise.all([
+        prisma.user.findUnique({
             where:{
-                id:{
-                    in:uniqueComboIds
-                },
-                shopId,
-                active:true
+                id:req.userData?.id
             },
             select:{
                 id:true,
                 name:true,
-                totalPrice:true,
-                finalPrice:true,
-                availableQuantity:true,
-                items:{
-                    select:{
-                        quantity:true,
-                        item:{
-                            select:{
-                                id:true,
-                                availableQuantity:true,
-                                item:{
-                                    select:{
-                                        name:true
+                phone:true,
+                role:true,
+                billingPlan:true,
+                isBlocked:true
+            }
+        }),
+        prisma.shop.findUnique({
+            where:{
+                id:shopId
+            },
+            select:{
+                id:true,
+                shopName:true,
+                ownerId:true,
+                ShopOpenStatus:true,
+                Verified:true,
+                billingStatus:true
+            }
+        }),
+        uniqueShopItemIds.length > 0
+            ? prisma.shopItem.findMany({
+                where:{
+                    id:{
+                        in:uniqueShopItemIds
+                    },
+                    shopId,
+                    active:true
+                },
+                select:{
+                    id:true,
+                    pricing:true,
+                    availableQuantity:true,
+                    item:{
+                        select:{
+                            id:true,
+                            name:true
+                        }
+                    }
+                }
+            })
+            : Promise.resolve([]),
+        uniqueComboIds.length > 0
+            ? prisma.combo.findMany({
+                where:{
+                    id:{
+                        in:uniqueComboIds
+                    },
+                    shopId,
+                    active:true
+                },
+                select:{
+                    id:true,
+                    name:true,
+                    totalPrice:true,
+                    availableQuantity:true,
+                    items:{
+                        select:{
+                            quantity:true,
+                            item:{
+                                select:{
+                                    id:true,
+                                    availableQuantity:true,
+                                    item:{
+                                        select:{
+                                            name:true
+                                        }
                                     }
                                 }
                             }
                         }
                     }
                 }
-            }
-        })
-        : [];
+            })
+            : Promise.resolve([]),
+        selectedOfferIds.length > 0
+            ? prisma.offer.findMany({
+                where:{
+                    id:{
+                        in:selectedOfferIds
+                    },
+                    shopId,
+                    active:true,
+                    startsAt:{
+                        lte:now
+                    },
+                    endsAt:{
+                        gte:now
+                    }
+                },
+                select:{
+                    id:true,
+                    title:true,
+                    offerType:true,
+                    applyTo:true,
+                    audienceType:true,
+                    stackingMode:true,
+                    minQuantity:true,
+                    minOrderAmount:true,
+                    discountType:true,
+                    discountValue:true,
+                    maxDiscountAmount:true,
+                    rewardQuantity:true,
+                    items:{
+                        select:{
+                            shopItemId:true,
+                            role:true
+                        }
+                    },
+                    combos:{
+                        select:{
+                            comboId:true,
+                            role:true
+                        }
+                    },
+                    buyers:{
+                        select:{
+                            buyerId:true
+                        }
+                    }
+                }
+            })
+            : Promise.resolve([]),
+        selectedOfferIds.length > 0
+            ? prisma.buyerCompletedOffer.findFirst({
+                where:{
+                    buyerId:req.userData?.id,
+                    shopId
+                },
+                select:{
+                    id:true
+                }
+            })
+            : Promise.resolve(null)
+    ]);
+
+    if(!currentUser || currentUser.isBlocked) throw new apiError(401,"User blocked or unauthorized");
+    if(currentUser.role !== "BUYER") throw new apiError(403,"Buyer access required");
+    if(!shop) throw new apiError(404,"shop not found");
+    if(shop.billingStatus === "HOLD" || shop.billingStatus === "PAYMENT_DUE"){
+        throw new apiError(402,"shop ordering is temporarily unavailable while billing is on hold");
+    }
+
+    if(shopItemsData.length !== uniqueShopItemIds.length){
+        throw new apiError(400,"one or more items are invalid for this shop");
+    }
 
     if(combosData.length !== uniqueComboIds.length){
         throw new apiError(400,"one or more combos are invalid for this shop");
     }
 
+    const shopItemsById = new Map(shopItemsData.map((item)=>[item.id,item]));
+    const combosById = new Map(combosData.map((combo)=>[combo.id,combo]));
     const orderItemsToCreate = [];
     const shopItemQuantityUsage = new Map();
 
@@ -344,7 +600,7 @@ const createOrder = asyncHandler(async(req,res)=>{
     };
 
     normalizedItems.forEach((selectedItem)=>{
-        const shopItem = shopItemsData.find((currentItem)=>currentItem.id === String(selectedItem.shopItemId));
+        const shopItem = shopItemsById.get(String(selectedItem.shopItemId));
         const itemPrice = Number(shopItem.pricing);
 
         if(!Number.isInteger(itemPrice) || itemPrice < 0){
@@ -364,8 +620,8 @@ const createOrder = asyncHandler(async(req,res)=>{
     });
 
     normalizedCombos.forEach((selectedCombo)=>{
-        const combo = combosData.find((currentCombo)=>currentCombo.id === String(selectedCombo.comboId));
-        const comboPrice = Number(combo.finalPrice ?? combo.totalPrice);
+        const combo = combosById.get(String(selectedCombo.comboId));
+        const comboPrice = Number(combo.totalPrice);
 
         if(!Number.isInteger(comboPrice) || comboPrice < 0){
             throw new apiError(400,`${combo.name} has invalid pricing`);
@@ -402,23 +658,6 @@ const createOrder = asyncHandler(async(req,res)=>{
         throw new apiError(400,"deliveryAmount must be a valid number");
     }
 
-    const rawOfferInput = appliedOfferIds ?? offerIds ?? offerId;
-    let selectedOfferIds = [];
-    if(Array.isArray(rawOfferInput)){
-        selectedOfferIds = rawOfferInput.map(String).filter(Boolean);
-    }else if(typeof rawOfferInput === "string" && rawOfferInput.trim()){
-        const trimmedOfferInput = rawOfferInput.trim();
-        selectedOfferIds = trimmedOfferInput.startsWith("[")
-            ? JSON.parse(trimmedOfferInput).map(String).filter(Boolean)
-            : [trimmedOfferInput];
-    }else if(rawOfferInput){
-        selectedOfferIds = [String(rawOfferInput)];
-    }
-
-    if(new Set(selectedOfferIds).size !== selectedOfferIds.length){
-        throw new apiError(400,"duplicate offer ids are not allowed");
-    }
-
     const selectedItemQuantityById = new Map();
     const selectedComboQuantityById = new Map();
     const selectedItemTotalById = new Map();
@@ -446,28 +685,6 @@ const createOrder = asyncHandler(async(req,res)=>{
     const appliedOffers = [];
 
     if(selectedOfferIds.length > 0){
-        const now = new Date();
-        const offersData = await prisma.offer.findMany({
-            where:{
-                id:{
-                    in:selectedOfferIds
-                },
-                shopId,
-                active:true,
-                startsAt:{
-                    lte:now
-                },
-                endsAt:{
-                    gte:now
-                }
-            },
-            include:{
-                items:true,
-                combos:true,
-                buyers:true
-            }
-        });
-
         if(offersData.length !== selectedOfferIds.length){
             throw new apiError(400,"one or more offers are invalid or inactive for this shop");
         }
@@ -476,26 +693,15 @@ const createOrder = asyncHandler(async(req,res)=>{
             throw new apiError(400,"exclusive offers cannot be combined");
         }
 
-        const hasNewCustomerOffer = offersData.some((offer)=>offer.audienceType === "NEW_CUSTOMERS");
-        const completedOffer = hasNewCustomerOffer
-            ? await prisma.buyerCompletedOffer.findFirst({
-                where:{
-                    buyerId:currentUser.id,
-                    shopId
-                },
-                select:{
-                    id:true
-                }
-            })
-            : null;
-
         for(const offer of offersData){
-            const appliesToItemIds = offer.items.filter((item)=>item.role === "APPLIES_TO").map((item)=>item.shopItemId);
-            const buyItemIds = offer.items.filter((item)=>item.role === "CUSTOMER_BUYS").map((item)=>item.shopItemId);
-            const rewardItemIds = offer.items.filter((item)=>item.role === "CUSTOMER_GETS").map((item)=>item.shopItemId);
-            const appliesToComboIds = offer.combos.filter((combo)=>combo.role === "APPLIES_TO").map((combo)=>combo.comboId);
-            const buyComboIds = offer.combos.filter((combo)=>combo.role === "CUSTOMER_BUYS").map((combo)=>combo.comboId);
-            const rewardComboIds = offer.combos.filter((combo)=>combo.role === "CUSTOMER_GETS").map((combo)=>combo.comboId);
+            const offerItemIds = groupOfferSelections(offer.items,"shopItemId");
+            const offerComboIds = groupOfferSelections(offer.combos,"comboId");
+            const appliesToItemIds = offerItemIds.APPLIES_TO;
+            const buyItemIds = offerItemIds.CUSTOMER_BUYS;
+            const rewardItemIds = offerItemIds.CUSTOMER_GETS;
+            const appliesToComboIds = offerComboIds.APPLIES_TO;
+            const buyComboIds = offerComboIds.CUSTOMER_BUYS;
+            const rewardComboIds = offerComboIds.CUSTOMER_GETS;
 
             if(offer.audienceType === "SPECIFIC_BUYERS" && !offer.buyers.some((buyer)=>buyer.buyerId === currentUser.id)){
                 throw new apiError(400,`${offer.title} is not available for this buyer`);
@@ -638,63 +844,13 @@ const createOrder = asyncHandler(async(req,res)=>{
                 create:orderItemsToCreate
             }
         },
-        include:orderResponseInclude
+        select:createdOrderSelect
     });
 
     return res.status(201).json(new apiResponse(201,{
-        ...order,
-        appliedOffers
-    },"order created successfully"));
-});
-
-const getMyOrders = asyncHandler(async(req,res)=>{
-    const currentUser = await prisma.user.findUnique({
-        where:{
-            id:req.userData?.id
-        },
-        select:{
-            id:true,
-            role:true,
-            isBlocked:true
-        }
-    });
-
-    if(!currentUser || currentUser.isBlocked) throw new apiError(401,"User blocked or unauthorized");
-
-    const orders = await prisma.order.findMany({
-        where:{
-            userId:currentUser.id
-        },
-        include:{
-            shop:{
-                select:{
-                    id:true,
-                    shopName:true,
-                    ownerId:true
-                }
-            },
-            orderItems:{
-                select:{
-                    id:true,
-                    orderItemType:true,
-                    shopItemId:true,
-                    comboId:true,
-                    name:true,
-                    quantity:true,
-                    priceAtOrderTime:true,
-                    totalPrice:true
-                }
-            }
-        },
-        orderBy:{
-            createdAt:"desc"
-        }
-    });
-
-    const formattedOrders = orders.map((order)=>({
         id:order.id,
-        shopId:order.shopId,
-        shopName:order.shop?.shopName || null,
+        shopId:shop.id,
+        shopName:shop.shopName,
         currentOrderStatus:order.currentOrderStatus,
         paymentMethod:order.paymentMethod,
         paymentReceived:order.paymentReceived,
@@ -703,191 +859,191 @@ const getMyOrders = asyncHandler(async(req,res)=>{
         deliveryAmount:order.deliveryAmount,
         deliveryDiscountAmount:order.deliveryDiscountAmount,
         totalAmount:order.totalAmount,
-        paidAmount:order.paidAmount,
-        refundAmount:order.refundAmount,
         customerNote:order.customerNote,
-        completedAt:order.completedAt,
-        cancelledAt:order.cancelledAt,
-        refundedAt:order.refundedAt,
         createdAt:order.createdAt,
-        updatedAt:order.updatedAt,
-        items:order.orderItems.map((item)=>({
-            id:item.id,
-            type:item.orderItemType,
-            itemId:item.shopItemId || item.comboId,
-            name:item.name,
-            quantity:item.quantity,
-            price:item.priceAtOrderTime,
-            totalPrice:item.totalPrice
-        }))
-    }));
+        items:order.orderItems.map((item)=>(
+            {
+                id:item.id,
+                type:item.orderItemType,
+                itemId:item.shopItemId || item.comboId,
+                name:item.name,
+                quantity:item.quantity,
+                price:item.priceAtOrderTime,
+                totalPrice:item.totalPrice
+            }
+        )),
+        appliedOffers
+    },"order created successfully"));
+});
 
-    return res.status(200).json(new apiResponse(200,formattedOrders,"orders fetched successfully"));
+const getMyOrders = asyncHandler(async(req,res)=>{
+    const pagination = getPagination(req.query);
+    const where = {
+        userId:req.userData?.id
+    };
+
+    const [currentUser,orders,total] = await Promise.all([
+        prisma.user.findUnique({
+            where:{
+                id:req.userData?.id
+            },
+            select:{
+                id:true,
+                role:true,
+                isBlocked:true
+            }
+        }),
+        prisma.order.findMany({
+            where,
+            select:orderListSelect,
+            orderBy:{
+                createdAt:"desc"
+            },
+            skip:pagination.skip,
+            take:pagination.take
+        }),
+        prisma.order.count({ where })
+    ]);
+
+    if(!currentUser || currentUser.isBlocked) throw new apiError(401,"User blocked or unauthorized");
+
+    return res.status(200).json(new apiResponse(200,{
+        pagination:buildPaginationMeta({
+            page:pagination.page,
+            limit:pagination.limit,
+            total
+        }),
+        orders:orders.map(formatOrderListItem)
+    },"orders fetched successfully"));
 });
 
 const getSellerOrders = asyncHandler(async(req,res)=>{
-    const currentUser = await prisma.user.findUnique({
-        where:{
-            id:req.userData?.id
+    const pagination = getPagination(req.query);
+    const where = {
+        shop:{
+            ownerId:req.userData?.id
         },
-        select:{
-            id:true,
-            role:true,
-            isBlocked:true
+        currentOrderStatus:{
+            in:["NEW","PREPARING","READY"]
         }
-    });
+    };
+
+    const [currentUser,orders,total] = await Promise.all([
+        prisma.user.findUnique({
+            where:{
+                id:req.userData?.id
+            },
+            select:{
+                id:true,
+                role:true,
+                isBlocked:true
+            }
+        }),
+        prisma.order.findMany({
+            where,
+            select:sellerOrderListSelect,
+            orderBy:{
+                createdAt:"asc"
+            },
+            skip:pagination.skip,
+            take:pagination.take
+        }),
+        prisma.order.count({ where })
+    ]);
 
     if(!currentUser || currentUser.isBlocked) throw new apiError(401,"User blocked or unauthorized");
     if(currentUser.role !== "SELLER") throw new apiError(403,"Seller access required");
 
-    const orders = await prisma.order.findMany({
-        where:{
-            shop:{
-                ownerId:currentUser.id
-            },
-            currentOrderStatus:{
-                in:["NEW","PREPARING","READY"]
-            }
-        },
-        include:{
-            user:{
-                select:{
-                    id:true,
-                    name:true,
-                    phone:true
-                }
-            },
-            shop:{
-                select:{
-                    id:true,
-                    shopName:true,
-                    ownerId:true
-                }
-            },
-            orderItems:{
-                select:{
-                    id:true,
-                    orderItemType:true,
-                    shopItemId:true,
-                    comboId:true,
-                    name:true,
-                    quantity:true,
-                    priceAtOrderTime:true,
-                    totalPrice:true
-                }
-            }
-        },
-        orderBy:{
-            createdAt:"asc"
-        }
-    });
-
-    return res.status(200).json(new apiResponse(200,orders,"seller active orders fetched successfully"));
+    return res.status(200).json(new apiResponse(200,{
+        pagination:buildPaginationMeta({
+            page:pagination.page,
+            limit:pagination.limit,
+            total
+        }),
+        orders:orders.map(formatOrderListItem)
+    },"seller active orders fetched successfully"));
 });
 
 const getSellerProcessedOrders = asyncHandler(async(req,res)=>{
-    const currentUser = await prisma.user.findUnique({
-        where:{
-            id:req.userData?.id
+    const pagination = getPagination(req.query);
+    const where = {
+        shop:{
+            ownerId:req.userData?.id
         },
-        select:{
-            id:true,
-            role:true,
-            isBlocked:true
-        }
-    });
+        currentOrderStatus:"DONE"
+    };
+
+    const [currentUser,orders,total] = await Promise.all([
+        prisma.user.findUnique({
+            where:{
+                id:req.userData?.id
+            },
+            select:{
+                id:true,
+                role:true,
+                isBlocked:true
+            }
+        }),
+        prisma.order.findMany({
+            where,
+            select:sellerOrderListSelect,
+            orderBy:{
+                updatedAt:"desc"
+            },
+            skip:pagination.skip,
+            take:pagination.take
+        }),
+        prisma.order.count({ where })
+    ]);
 
     if(!currentUser || currentUser.isBlocked) throw new apiError(401,"User blocked or unauthorized");
     if(currentUser.role !== "SELLER") throw new apiError(403,"Seller access required");
 
-    const orders = await prisma.order.findMany({
-        where:{
-            shop:{
-                ownerId:currentUser.id
-            },
-            currentOrderStatus:"DONE"
-        },
-        include:{
-            user:{
-                select:{
-                    id:true,
-                    name:true,
-                    phone:true
-                }
-            },
-            shop:{
-                select:{
-                    id:true,
-                    shopName:true,
-                    ownerId:true
-                }
-            },
-            orderItems:{
-                select:{
-                    id:true,
-                    orderItemType:true,
-                    shopItemId:true,
-                    comboId:true,
-                    name:true,
-                    quantity:true,
-                    priceAtOrderTime:true,
-                    totalPrice:true
-                }
-            }
-        },
-        orderBy:{
-            updatedAt:"desc"
-        }
-    });
-
-    return res.status(200).json(new apiResponse(200,orders,"seller processed orders fetched successfully"));
+    return res.status(200).json(new apiResponse(200,{
+        pagination:buildPaginationMeta({
+            page:pagination.page,
+            limit:pagination.limit,
+            total
+        }),
+        orders:orders.map(formatOrderListItem)
+    },"seller processed orders fetched successfully"));
 });
 
 const getOrderCurrentStatus = asyncHandler(async(req,res)=>{
     const { orderId } = req.params;
 
-    if(!orderId) throw new apiError(400,"order id is required");
+    requireValidOrderId(orderId);
 
-    const currentUser = await prisma.user.findUnique({
-        where:{
-            id:req.userData?.id
-        },
-        select:{
-            id:true,
-            role:true,
-            isBlocked:true
-        }
-    });
-
-    if(!currentUser || currentUser.isBlocked) throw new apiError(401,"User blocked or unauthorized");
-
-    const order = await prisma.order.findUnique({
-        where:{
-            id:orderId
-        },
-        select:{
-            id:true,
-            userId:true,
-            currentOrderStatus:true,
-            paymentMethod:true,
-            paymentReceived:true,
-            totalAmount:true,
-            paidAmount:true,
-            refundAmount:true,
-            createdAt:true,
-            updatedAt:true,
-            completedAt:true,
-            cancelledAt:true,
-            refundedAt:true,
-            shop:{
-                select:{
-                    id:true,
-                    shopName:true,
-                    ownerId:true
+    const [currentUser,order] = await Promise.all([
+        prisma.user.findUnique({
+            where:{
+                id:req.userData?.id
+            },
+            select:{
+                id:true,
+                role:true,
+                isBlocked:true
+            }
+        }),
+        prisma.order.findUnique({
+            where:{
+                id:orderId
+            },
+            select:{
+                id:true,
+                userId:true,
+                currentOrderStatus:true,
+                paymentReceived:true,
+                shop:{
+                    select:{
+                        ownerId:true
+                    }
                 }
             }
-        }
-    });
+        })
+    ]);
+
+    if(!currentUser || currentUser.isBlocked) throw new apiError(401,"User blocked or unauthorized");
 
     if(!order) throw new apiError(404,"order not found");
 
@@ -926,117 +1082,112 @@ const getOrderCurrentStatus = asyncHandler(async(req,res)=>{
 });
 
 const getAllProcessedOrders = asyncHandler(async(req,res)=>{
-    const currentUser = await prisma.user.findUnique({
-        where:{
-            id:req.userData?.id
-        },
-        select:{
-            id:true,
-            role:true,
-            isBlocked:true
-        }
-    });
+    const pagination = getPagination(req.query);
+    const where = {
+        currentOrderStatus:"DONE"
+    };
+
+    const [currentUser,orders,total] = await Promise.all([
+        prisma.user.findUnique({
+            where:{
+                id:req.userData?.id
+            },
+            select:{
+                id:true,
+                role:true,
+                isBlocked:true
+            }
+        }),
+        prisma.order.findMany({
+            where,
+            select:sellerOrderListSelect,
+            orderBy:{
+                updatedAt:"desc"
+            },
+            skip:pagination.skip,
+            take:pagination.take
+        }),
+        prisma.order.count({ where })
+    ]);
 
     if(!currentUser || currentUser.isBlocked) throw new apiError(401,"User blocked or unauthorized");
     if(currentUser.role !== "ADMIN") throw new apiError(403,"Admin access required");
 
-    const orders = await prisma.order.findMany({
-        where:{
-            currentOrderStatus:"DONE"
-        },
-        include:{
-            user:{
-                select:{
-                    id:true,
-                    name:true,
-                    phone:true
-                }
-            },
-            shop:{
-                select:{
-                    id:true,
-                    shopName:true,
-                    ownerId:true,
-                    owner:{
-                        select:{
-                            id:true,
-                            name:true,
-                            phone:true
-                        }
-                    }
-                }
-            },
-            orderItems:{
-                select:{
-                    id:true,
-                    orderItemType:true,
-                    shopItemId:true,
-                    comboId:true,
-                    name:true,
-                    quantity:true,
-                    priceAtOrderTime:true,
-                    totalPrice:true
-                }
-            }
-        },
-        orderBy:{
-            updatedAt:"desc"
-        }
-    });
-
-    return res.status(200).json(new apiResponse(200,orders,"all processed orders fetched successfully"));
+    return res.status(200).json(new apiResponse(200,{
+        pagination:buildPaginationMeta({
+            page:pagination.page,
+            limit:pagination.limit,
+            total
+        }),
+        orders:orders.map(formatOrderListItem)
+    },"all processed orders fetched successfully"));
 });
 
 const markPaymentReceived = asyncHandler(async(req,res)=>{
     const { orderId } = req.params;
 
-    if(!orderId) throw new apiError(400,"order id is required");
+    requireValidOrderId(orderId);
 
-    const currentUser = await prisma.user.findUnique({
-        where:{
-            id:req.userData?.id
-        },
-        select:{
-            id:true,
-            role:true,
-            isBlocked:true
-        }
-    });
+    const updatedOrders = await prisma.$queryRaw`
+        WITH updated_order AS (
+            UPDATE "Order" AS orders
+            SET
+                "paymentReceived" = TRUE,
+                "paidAmount" = orders."totalAmount",
+                "updatedAt" = CURRENT_TIMESTAMP
+            FROM "Shop" AS shops
+            JOIN "User" AS owners ON owners."id" = shops."ownerId"
+            WHERE orders."id" = ${orderId}
+              AND orders."shopId" = shops."id"
+              AND shops."ownerId" = ${req.userData?.id}
+              AND owners."role" = 'SELLER'
+              AND owners."isBlocked" = FALSE
+              AND orders."currentOrderStatus" NOT IN ('DONE','CANCELLED')
+            RETURNING
+                orders."id",
+                orders."currentOrderStatus",
+                orders."paymentReceived",
+                orders."paidAmount",
+                orders."refundAmount"
+        )
+        SELECT * FROM updated_order
+    `;
 
-    if(!currentUser || currentUser.isBlocked) throw new apiError(401,"User blocked or unauthorized");
-    if(currentUser.role !== "SELLER") throw new apiError(403,"Seller access required");
-
-    const order = await prisma.order.findUnique({
-        where:{
-            id:orderId
-        },
-        include:{
-            shop:{
+    if(updatedOrders.length === 0){
+        const [currentUser,order] = await Promise.all([
+            prisma.user.findUnique({
+                where:{
+                    id:req.userData?.id
+                },
                 select:{
                     id:true,
-                    shopName:true,
-                    ownerId:true
+                    role:true,
+                    isBlocked:true
                 }
-            }
-        }
-    });
+            }),
+            prisma.order.findUnique({
+                where:{
+                    id:orderId
+                },
+                select:{
+                    currentOrderStatus:true,
+                    shop:{
+                        select:{
+                            ownerId:true
+                        }
+                    }
+                }
+            })
+        ]);
 
-    if(!order) throw new apiError(404,"order not found");
-    if(!order.shop || order.shop.ownerId !== currentUser.id) throw new apiError(403,"You can only manage orders for your own shop");
-    if(order.currentOrderStatus === "DONE" || order.currentOrderStatus === "CANCELLED"){
+        if(!currentUser || currentUser.isBlocked) throw new apiError(401,"User blocked or unauthorized");
+        if(currentUser.role !== "SELLER") throw new apiError(403,"Seller access required");
+        if(!order) throw new apiError(404,"order not found");
+        if(!order.shop || order.shop.ownerId !== currentUser.id) throw new apiError(403,"You can only manage orders for your own shop");
         throw new apiError(400,"completed or cancelled orders cannot be updated");
     }
 
-    const updatedOrder = await prisma.order.update({
-        where:{
-            id:order.id
-        },
-        data:{
-            paymentReceived:true,
-            paidAmount:order.totalAmount
-        },
-        include:orderResponseInclude
-    });
+    const updatedOrder = updatedOrders[0];
 
     return res.status(200).json(new apiResponse(200,updatedOrder,"payment marked received successfully"));
 });
@@ -1044,79 +1195,82 @@ const markPaymentReceived = asyncHandler(async(req,res)=>{
 const confirmOrder = asyncHandler(async(req,res)=>{
     const { orderId } = req.params;
 
-    if(!orderId) throw new apiError(400,"order id is required");
+    requireValidOrderId(orderId);
 
-    const currentUser = await prisma.user.findUnique({
-        where:{
-            id:req.userData?.id
-        },
-        select:{
-            id:true,
-            role:true,
-            isBlocked:true
-        }
-    });
+    const [currentUser,order] = await Promise.all([
+        prisma.user.findUnique({
+            where:{
+                id:req.userData?.id
+            },
+            select:{
+                id:true,
+                role:true,
+                isBlocked:true
+            }
+        }),
+        prisma.order.findUnique({
+            where:{
+                id:orderId
+            },
+            include:orderInventoryInclude
+        })
+    ]);
 
     if(!currentUser || currentUser.isBlocked) throw new apiError(401,"User blocked or unauthorized");
     if(currentUser.role !== "SELLER") throw new apiError(403,"Seller access required");
-
-    const order = await prisma.order.findUnique({
-        where:{
-            id:orderId
-        },
-        include:orderInventoryInclude
-    });
 
     if(!order) throw new apiError(404,"order not found");
     if(!order.shop || order.shop.ownerId !== currentUser.id) throw new apiError(403,"You can only manage orders for your own shop");
     if(order.currentOrderStatus !== "NEW") throw new apiError(400,"only new orders can be confirmed");
 
     const {shopItemUsage,comboUsage} = getOrderInventoryUsage(order);
+    const finiteShopItemUsage = shopItemUsage.filter((usage)=>usage.availableQuantity !== null);
+    const finiteComboUsage = comboUsage.filter((usage)=>usage.availableQuantity !== null);
 
     const updatedOrder = await prisma.$transaction(async(tx)=>{
-        for(const usage of shopItemUsage){
-            if(usage.availableQuantity === null) continue;
+        const [inventoryResult] = await tx.$queryRaw`
+            WITH shop_item_usage AS (
+                SELECT *
+                FROM jsonb_to_recordset(${serializeInventoryUsage(finiteShopItemUsage)}::jsonb)
+                    AS usage("id" text,"quantity" integer)
+            ),
+            combo_usage AS (
+                SELECT *
+                FROM jsonb_to_recordset(${serializeInventoryUsage(finiteComboUsage)}::jsonb)
+                    AS usage("id" text,"quantity" integer)
+            ),
+            updated_shop_items AS (
+                UPDATE "ShopItem" AS shop_items
+                SET
+                    "availableQuantity" = shop_items."availableQuantity" - usage."quantity",
+                    "updatedAt" = CURRENT_TIMESTAMP
+                FROM shop_item_usage AS usage
+                WHERE shop_items."id" = usage."id"
+                  AND shop_items."availableQuantity" >= usage."quantity"
+                RETURNING shop_items."id"
+            ),
+            updated_combos AS (
+                UPDATE "Combo" AS combos
+                SET
+                    "availableQuantity" = combos."availableQuantity" - usage."quantity",
+                    "updatedAt" = CURRENT_TIMESTAMP
+                FROM combo_usage AS usage
+                WHERE combos."id" = usage."id"
+                  AND combos."availableQuantity" >= usage."quantity"
+                RETURNING combos."id"
+            )
+            SELECT
+                COALESCE((SELECT jsonb_agg("id") FROM updated_shop_items),'[]'::jsonb) AS "shopItemIds",
+                COALESCE((SELECT jsonb_agg("id") FROM updated_combos),'[]'::jsonb) AS "comboIds"
+        `;
 
-            const updatedShopItems = await tx.shopItem.updateMany({
-                where:{
-                    id:usage.id,
-                    availableQuantity:{
-                        gte:usage.quantity
-                    }
-                },
-                data:{
-                    availableQuantity:{
-                        decrement:usage.quantity
-                    }
-                }
-            });
+        const updatedShopItemIds = new Set(inventoryResult.shopItemIds);
+        const updatedComboIds = new Set(inventoryResult.comboIds);
+        const unavailableShopItem = finiteShopItemUsage.find((usage)=>!updatedShopItemIds.has(usage.id));
+        const unavailableCombo = finiteComboUsage.find((usage)=>!updatedComboIds.has(usage.id));
 
-            if(updatedShopItems.count !== 1){
-                throw new apiError(400,`${usage.name} does not have enough quantity`);
-            }
-        }
-
-        for(const usage of comboUsage){
-            if(usage.availableQuantity === null) continue;
-
-            const updatedCombos = await tx.combo.updateMany({
-                where:{
-                    id:usage.id,
-                    availableQuantity:{
-                        gte:usage.quantity
-                    }
-                },
-                data:{
-                    availableQuantity:{
-                        decrement:usage.quantity
-                    }
-                }
-            });
-
-            if(updatedCombos.count !== 1){
-                throw new apiError(400,`${usage.name} does not have enough quantity`);
-            }
-        }
+        if(unavailableShopItem) throw new apiError(400,`${unavailableShopItem.name} does not have enough quantity`);
+        if(unavailableCombo) throw new apiError(400,`${unavailableCombo.name} does not have enough quantity`);
 
         return tx.order.update({
             where:{
@@ -1125,7 +1279,10 @@ const confirmOrder = asyncHandler(async(req,res)=>{
             data:{
                 currentOrderStatus:"PREPARING"
             },
-            include:orderResponseInclude
+            select:{
+                id:true,
+                currentOrderStatus:true
+            }
         });
     });
 
@@ -1135,50 +1292,66 @@ const confirmOrder = asyncHandler(async(req,res)=>{
 const markOrderReady = asyncHandler(async(req,res)=>{
     const { orderId } = req.params;
 
-    if(!orderId) throw new apiError(400,"order id is required");
+    requireValidOrderId(orderId);
 
-    const currentUser = await prisma.user.findUnique({
-        where:{
-            id:req.userData?.id
-        },
-        select:{
-            id:true,
-            role:true,
-            isBlocked:true
-        }
-    });
+    let updatedOrder;
 
-    if(!currentUser || currentUser.isBlocked) throw new apiError(401,"User blocked or unauthorized");
-    if(currentUser.role !== "SELLER") throw new apiError(403,"Seller access required");
+    try{
+        updatedOrder = await prisma.order.update({
+            where:{
+                id:orderId,
+                currentOrderStatus:"PREPARING",
+                shop:{
+                    ownerId:req.userData?.id,
+                    owner:{
+                        role:"SELLER",
+                        isBlocked:false
+                    }
+                }
+            },
+            data:{
+                currentOrderStatus:"READY"
+            },
+            select:{
+                id:true,
+                currentOrderStatus:true
+            }
+        });
+    }catch(error){
+        if(error?.code !== "P2025") throw error;
 
-    const order = await prisma.order.findUnique({
-        where:{
-            id:orderId
-        },
-        include:{
-            shop:{
+        const [currentUser,order] = await Promise.all([
+            prisma.user.findUnique({
+                where:{
+                    id:req.userData?.id
+                },
                 select:{
                     id:true,
-                    shopName:true,
-                    ownerId:true
+                    role:true,
+                    isBlocked:true
                 }
-            }
-        }
-    });
+            }),
+            prisma.order.findUnique({
+                where:{
+                    id:orderId
+                },
+                select:{
+                    currentOrderStatus:true,
+                    shop:{
+                        select:{
+                            ownerId:true
+                        }
+                    }
+                }
+            })
+        ]);
 
-    if(!order) throw new apiError(404,"order not found");
-    if(!order.shop || order.shop.ownerId !== currentUser.id) throw new apiError(403,"You can only manage orders for your own shop");
-    if(order.currentOrderStatus !== "PREPARING") throw new apiError(400,"only preparing orders can be marked ready");
-
-    const updatedOrder = await prisma.order.update({
-        where:{
-            id:order.id
-        },
-        data:{
-            currentOrderStatus:"READY"
-        },
-        include:orderResponseInclude
-    });
+        if(!currentUser || currentUser.isBlocked) throw new apiError(401,"User blocked or unauthorized");
+        if(currentUser.role !== "SELLER") throw new apiError(403,"Seller access required");
+        if(!order) throw new apiError(404,"order not found");
+        if(!order.shop || order.shop.ownerId !== currentUser.id) throw new apiError(403,"You can only manage orders for your own shop");
+        throw new apiError(400,"only preparing orders can be marked ready");
+    }
 
     return res.status(200).json(new apiResponse(200,updatedOrder,"order marked ready successfully"));
 });
@@ -1186,36 +1359,37 @@ const markOrderReady = asyncHandler(async(req,res)=>{
 const markOrderComplete = asyncHandler(async(req,res)=>{
     const { orderId } = req.params;
 
-    if(!orderId) throw new apiError(400,"order id is required");
+    requireValidOrderId(orderId);
 
-    const currentUser = await prisma.user.findUnique({
-        where:{
-            id:req.userData?.id
-        },
-        select:{
-            id:true,
-            role:true,
-            isBlocked:true
-        }
-    });
+    const [currentUser,order] = await Promise.all([
+        prisma.user.findUnique({
+            where:{
+                id:req.userData?.id
+            },
+            select:{
+                id:true,
+                role:true,
+                isBlocked:true
+            }
+        }),
+        prisma.order.findUnique({
+            where:{
+                id:orderId
+            },
+            include:{
+                shop:{
+                    select:{
+                        id:true,
+                        shopName:true,
+                        ownerId:true
+                    }
+                }
+            }
+        })
+    ]);
 
     if(!currentUser || currentUser.isBlocked) throw new apiError(401,"User blocked or unauthorized");
     if(currentUser.role !== "SELLER") throw new apiError(403,"Seller access required");
-
-    const order = await prisma.order.findUnique({
-        where:{
-            id:orderId
-        },
-        include:{
-            shop:{
-                select:{
-                    id:true,
-                    shopName:true,
-                    ownerId:true
-                }
-            }
-        }
-    });
 
     if(!order) throw new apiError(404,"order not found");
     if(!order.shop || order.shop.ownerId !== currentUser.id) throw new apiError(403,"You can only manage orders for your own shop");
@@ -1229,6 +1403,8 @@ const markOrderComplete = asyncHandler(async(req,res)=>{
     const deliveryRevenue = Math.max((order.deliveryAmount || 0) - (order.deliveryDiscountAmount || 0),0);
 
     const updatedOrder = await prisma.$transaction(async(tx)=>{
+        const billingSettings = await getBillingSettings(tx);
+        const commissionAmount = calculateBpsAmount(finalPaidAmount,billingSettings.commissionBps);
         const completedOrder = await tx.order.update({
             where:{
                 id:order.id
@@ -1239,52 +1415,23 @@ const markOrderComplete = asyncHandler(async(req,res)=>{
                 paidAmount:finalPaidAmount,
                 completedAt
             },
-            include:orderResponseInclude
+            select:orderMutationSelect
         });
 
-        for(const periodData of [
-            { periodType:"DAILY", periodDate:dailyPeriodDate },
-            { periodType:"MONTHLY", periodDate:monthlyPeriodDate },
-            { periodType:"YEARLY", periodDate:yearlyPeriodDate }
-        ]){
-            await tx.shopRevenueSummary.upsert({
-                where:{
-                    shopId_periodType_periodDate:{
-                        shopId:order.shop.id,
-                        periodType:periodData.periodType,
-                        periodDate:periodData.periodDate
-                    }
-                },
-                update:{
-                    successfulOrders:{
-                        increment:1
-                    },
-                    grossRevenue:{
-                        increment:order.totalAmount
-                    },
-                    discountAmount:{
-                        increment:order.discountAmount + order.deliveryDiscountAmount
-                    },
-                    deliveryRevenue:{
-                        increment:deliveryRevenue
-                    },
-                    netRevenue:{
-                        increment:finalPaidAmount - order.refundAmount
-                    }
-                },
-                create:{
-                    shopId:order.shop.id,
-                    periodType:periodData.periodType,
-                    periodDate:periodData.periodDate,
-                    successfulOrders:1,
-                    grossRevenue:order.totalAmount,
-                    discountAmount:order.discountAmount + order.deliveryDiscountAmount,
-                    deliveryRevenue,
-                    refundAmount:0,
-                    netRevenue:finalPaidAmount - order.refundAmount
-                }
-            });
-        }
+        await applyRevenueDeltas(tx,[dailyPeriodDate,monthlyPeriodDate,yearlyPeriodDate].map((periodDate,index)=>(
+            {
+                shopId:order.shop.id,
+                periodType:["DAILY","MONTHLY","YEARLY"][index],
+                periodDate,
+                successfulOrders:1,
+                cancelledOrders:0,
+                grossRevenue:order.totalAmount,
+                discountAmount:order.discountAmount + order.deliveryDiscountAmount,
+                deliveryRevenue,
+                refundAmount:0,
+                netRevenue:finalPaidAmount - order.refundAmount
+            }
+        )));
 
         await tx.buyerCompletedOffer.upsert({
             where:{
@@ -1304,6 +1451,17 @@ const markOrderComplete = asyncHandler(async(req,res)=>{
             }
         });
 
+        await tx.orderCommissionCharge.create({
+            data:{
+                orderId:order.id,
+                shopId:order.shop.id,
+                orderValue:finalPaidAmount,
+                commissionBps:billingSettings.commissionBps,
+                commissionAmount,
+                completedAt
+            }
+        });
+
         return completedOrder;
     });
 
@@ -1314,27 +1472,28 @@ const cancelOrder = asyncHandler(async(req,res)=>{
     const { orderId } = req.params;
     const { refundAmount } = req.body;
 
-    if(!orderId) throw new apiError(400,"order id is required");
+    requireValidOrderId(orderId);
 
-    const currentUser = await prisma.user.findUnique({
-        where:{
-            id:req.userData?.id
-        },
-        select:{
-            id:true,
-            role:true,
-            isBlocked:true
-        }
-    });
+    const [currentUser,order] = await Promise.all([
+        prisma.user.findUnique({
+            where:{
+                id:req.userData?.id
+            },
+            select:{
+                id:true,
+                role:true,
+                isBlocked:true
+            }
+        }),
+        prisma.order.findUnique({
+            where:{
+                id:orderId
+            },
+            include:orderInventoryInclude
+        })
+    ]);
 
     if(!currentUser || currentUser.isBlocked) throw new apiError(401,"User blocked or unauthorized");
-
-    const order = await prisma.order.findUnique({
-        where:{
-            id:orderId
-        },
-        include:orderInventoryInclude
-    });
 
     if(!order) throw new apiError(404,"order not found");
 
@@ -1367,37 +1526,41 @@ const cancelOrder = asyncHandler(async(req,res)=>{
 
     const updatedOrder = await prisma.$transaction(async(tx)=>{
         if(shouldRestoreInventory){
-            for(const usage of shopItemUsage){
-                await tx.shopItem.updateMany({
-                    where:{
-                        id:usage.id,
-                        availableQuantity:{
-                            not:null
-                        }
-                    },
-                    data:{
-                        availableQuantity:{
-                            increment:usage.quantity
-                        }
-                    }
-                });
-            }
-
-            for(const usage of comboUsage){
-                await tx.combo.updateMany({
-                    where:{
-                        id:usage.id,
-                        availableQuantity:{
-                            not:null
-                        }
-                    },
-                    data:{
-                        availableQuantity:{
-                            increment:usage.quantity
-                        }
-                    }
-                });
-            }
+            await tx.$queryRaw`
+                WITH shop_item_usage AS (
+                    SELECT *
+                    FROM jsonb_to_recordset(${serializeInventoryUsage(shopItemUsage)}::jsonb)
+                        AS usage("id" text,"quantity" integer)
+                ),
+                combo_usage AS (
+                    SELECT *
+                    FROM jsonb_to_recordset(${serializeInventoryUsage(comboUsage)}::jsonb)
+                        AS usage("id" text,"quantity" integer)
+                ),
+                restored_shop_items AS (
+                    UPDATE "ShopItem" AS shop_items
+                    SET
+                        "availableQuantity" = shop_items."availableQuantity" + usage."quantity",
+                        "updatedAt" = CURRENT_TIMESTAMP
+                    FROM shop_item_usage AS usage
+                    WHERE shop_items."id" = usage."id"
+                      AND shop_items."availableQuantity" IS NOT NULL
+                    RETURNING shop_items."id"
+                ),
+                restored_combos AS (
+                    UPDATE "Combo" AS combos
+                    SET
+                        "availableQuantity" = combos."availableQuantity" + usage."quantity",
+                        "updatedAt" = CURRENT_TIMESTAMP
+                    FROM combo_usage AS usage
+                    WHERE combos."id" = usage."id"
+                      AND combos."availableQuantity" IS NOT NULL
+                    RETURNING combos."id"
+                )
+                SELECT
+                    (SELECT count(*) FROM restored_shop_items) AS "shopItemCount",
+                    (SELECT count(*) FROM restored_combos) AS "comboCount"
+            `;
         }
 
         const cancelledOrder = await tx.order.update({
@@ -1410,44 +1573,23 @@ const cancelOrder = asyncHandler(async(req,res)=>{
                 cancelledAt,
                 refundedAt:normalizedRefundAmount > 0 ? cancelledAt : null
             },
-            include:orderResponseInclude
+            select:orderMutationSelect
         });
 
-        for(const periodData of [
-            { periodType:"DAILY", periodDate:dailyPeriodDate },
-            { periodType:"MONTHLY", periodDate:monthlyPeriodDate },
-            { periodType:"YEARLY", periodDate:yearlyPeriodDate }
-        ]){
-            await tx.shopRevenueSummary.upsert({
-                where:{
-                    shopId_periodType_periodDate:{
-                        shopId:order.shop.id,
-                        periodType:periodData.periodType,
-                        periodDate:periodData.periodDate
-                    }
-                },
-                update:{
-                    cancelledOrders:{
-                        increment:1
-                    },
-                    refundAmount:{
-                        increment:normalizedRefundAmount
-                    }
-                },
-                create:{
-                    shopId:order.shop.id,
-                    periodType:periodData.periodType,
-                    periodDate:periodData.periodDate,
-                    successfulOrders:0,
-                    cancelledOrders:1,
-                    grossRevenue:0,
-                    discountAmount:0,
-                    deliveryRevenue:0,
-                    refundAmount:normalizedRefundAmount,
-                    netRevenue:0
-                }
-            });
-        }
+        await applyRevenueDeltas(tx,[dailyPeriodDate,monthlyPeriodDate,yearlyPeriodDate].map((periodDate,index)=>(
+            {
+                shopId:order.shop.id,
+                periodType:["DAILY","MONTHLY","YEARLY"][index],
+                periodDate,
+                successfulOrders:0,
+                cancelledOrders:1,
+                grossRevenue:0,
+                discountAmount:0,
+                deliveryRevenue:0,
+                refundAmount:normalizedRefundAmount,
+                netRevenue:0
+            }
+        )));
 
         return cancelledOrder;
     });
@@ -1458,37 +1600,38 @@ const cancelOrder = asyncHandler(async(req,res)=>{
 const refundCompletedOrder = asyncHandler(async(req,res)=>{
     const { orderId } = req.params;
 
-    if(!orderId) throw new apiError(400,"order id is required");
+    requireValidOrderId(orderId);
 
-    const currentUser = await prisma.user.findUnique({
-        where:{
-            id:req.userData?.id
-        },
-        select:{
-            id:true,
-            role:true,
-            billingPlan:true,
-            isBlocked:true
-        }
-    });
+    const [currentUser,order] = await Promise.all([
+        prisma.user.findUnique({
+            where:{
+                id:req.userData?.id
+            },
+            select:{
+                id:true,
+                role:true,
+                billingPlan:true,
+                isBlocked:true
+            }
+        }),
+        prisma.order.findUnique({
+            where:{
+                id:orderId
+            },
+            include:{
+                shop:{
+                    select:{
+                        id:true,
+                        shopName:true,
+                        ownerId:true
+                    }
+                }
+            }
+        })
+    ]);
 
     if(!currentUser || currentUser.isBlocked) throw new apiError(401,"User blocked or unauthorized");
     if(currentUser.role !== "SELLER") throw new apiError(403,"Seller access required");
-
-    const order = await prisma.order.findUnique({
-        where:{
-            id:orderId
-        },
-        include:{
-            shop:{
-                select:{
-                    id:true,
-                    shopName:true,
-                    ownerId:true
-                }
-            }
-        }
-    });
 
     if(!order) throw new apiError(404,"order not found");
     if(!order.shop || order.shop.ownerId !== currentUser.id) throw new apiError(403,"You can only refund orders for your own shop");
@@ -1517,43 +1660,47 @@ const refundCompletedOrder = asyncHandler(async(req,res)=>{
                 },
                 refundedAt
             },
-            include:orderResponseInclude
+            select:orderMutationSelect
         });
 
-        for(const periodData of [
-            { periodType:"DAILY", periodDate:dailyPeriodDate },
-            { periodType:"MONTHLY", periodDate:monthlyPeriodDate },
-            { periodType:"YEARLY", periodDate:yearlyPeriodDate }
-        ]){
-            await tx.shopRevenueSummary.upsert({
-                where:{
-                    shopId_periodType_periodDate:{
-                        shopId:order.shop.id,
-                        periodType:periodData.periodType,
-                        periodDate:periodData.periodDate
+        await applyRevenueDeltas(tx,[dailyPeriodDate,monthlyPeriodDate,yearlyPeriodDate].map((periodDate,index)=>(
+            {
+                shopId:order.shop.id,
+                periodType:["DAILY","MONTHLY","YEARLY"][index],
+                periodDate,
+                successfulOrders:0,
+                cancelledOrders:0,
+                grossRevenue:0,
+                discountAmount:0,
+                deliveryRevenue:0,
+                refundAmount:normalizedRefundAmount,
+                netRevenue:-normalizedRefundAmount
+            }
+        )));
+
+        const commissionCharge = await tx.orderCommissionCharge.findUnique({
+            where:{orderId:order.id},
+            select:{
+                id:true,
+                commissionAmount:true,
+                refundedCommission:true
+            }
+        });
+
+        if(commissionCharge){
+            const commissionAdjustment = Math.max(
+                0,
+                commissionCharge.commissionAmount - commissionCharge.refundedCommission
+            );
+            if(commissionAdjustment > 0){
+                await tx.orderCommissionCharge.update({
+                    where:{id:commissionCharge.id},
+                    data:{
+                        refundedCommission:{increment:commissionAdjustment},
+                        pendingAdjustment:{increment:commissionAdjustment}
                     }
-                },
-                update:{
-                    refundAmount:{
-                        increment:normalizedRefundAmount
-                    },
-                    netRevenue:{
-                        decrement:normalizedRefundAmount
-                    }
-                },
-                create:{
-                    shopId:order.shop.id,
-                    periodType:periodData.periodType,
-                    periodDate:periodData.periodDate,
-                    successfulOrders:0,
-                    cancelledOrders:0,
-                    grossRevenue:0,
-                    discountAmount:0,
-                    deliveryRevenue:0,
-                    refundAmount:normalizedRefundAmount,
-                    netRevenue:-normalizedRefundAmount
-                }
-            });
+                });
+            }
         }
 
         return refundedOrder;

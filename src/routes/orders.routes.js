@@ -14,23 +14,24 @@ import {
     refundCompletedOrder
 } from "../controllers/orders/orders.controller.js";
 import { verifyJWT } from "../middleware/auth.middleware.js";
+import { checkoutRateLimit, expensiveReadRateLimit, writeRateLimit } from "../middleware/rateLimit.middleware.js";
 
 export const orderRouter = Router();
 
 orderRouter.use(verifyJWT);
 
-orderRouter.route("/checkout").post(createOrder);
-orderRouter.route("/my").get(getMyOrders);
+orderRouter.route("/checkout").post(checkoutRateLimit, createOrder);
+orderRouter.route("/my").get(expensiveReadRateLimit, getMyOrders);
 
-orderRouter.route("/seller").get(getSellerOrders);
-orderRouter.route("/seller/processed").get(getSellerProcessedOrders);
+orderRouter.route("/seller").get(expensiveReadRateLimit, getSellerOrders);
+orderRouter.route("/seller/processed").get(expensiveReadRateLimit, getSellerProcessedOrders);
 
-orderRouter.route("/processed/all").get(getAllProcessedOrders);
+orderRouter.route("/processed/all").get(expensiveReadRateLimit, getAllProcessedOrders);
 
 orderRouter.route("/:orderId/status").get(getOrderCurrentStatus);
-orderRouter.route("/:orderId/payment-received").patch(markPaymentReceived);
-orderRouter.route("/:orderId/confirm").patch(confirmOrder);
-orderRouter.route("/:orderId/ready").patch(markOrderReady);
-orderRouter.route("/:orderId/complete").patch(markOrderComplete);
-orderRouter.route("/:orderId/cancel").patch(cancelOrder);
-orderRouter.route("/:orderId/refund").patch(refundCompletedOrder);
+orderRouter.route("/:orderId/payment-received").patch(writeRateLimit, markPaymentReceived);
+orderRouter.route("/:orderId/confirm").patch(writeRateLimit, confirmOrder);
+orderRouter.route("/:orderId/ready").patch(writeRateLimit, markOrderReady);
+orderRouter.route("/:orderId/complete").patch(writeRateLimit, markOrderComplete);
+orderRouter.route("/:orderId/cancel").patch(writeRateLimit, cancelOrder);
+orderRouter.route("/:orderId/refund").patch(writeRateLimit, refundCompletedOrder);

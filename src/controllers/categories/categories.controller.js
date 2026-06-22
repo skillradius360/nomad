@@ -1,5 +1,22 @@
 import { prisma } from "../../db/index.js";
 import { apiError, apiResponse, asyncHandler } from "../../utils/handler.js";
+import { deleteCacheByPattern, getOrSetCachedData } from "../../utils/cache.js";
+import { buildPaginationMeta, getPagination } from "../../utils/pagination.js";
+import { shopHasFeature } from "../../utils/shopFeatures.js";
+
+const CATEGORY_CACHE_TTL = 60;
+const CATEGORY_CACHE_PATTERNS = [
+    "catalog:categories:*",
+    "catalog:shop:*:categories",
+    "catalog:master:items:*",
+    "catalog:shop:*:items:*"
+];
+
+const invalidateCategoryCaches = async()=>{
+    for(const pattern of CATEGORY_CACHE_PATTERNS){
+        await deleteCacheByPattern(pattern);
+    }
+}
 
 // admin
 const createCategory = asyncHandler(async(req,res)=>{
@@ -26,6 +43,7 @@ const createCategory = asyncHandler(async(req,res)=>{
     if(!categoryCreate){
         throw new apiError(400,"category creation failure")
     }
+    await invalidateCategoryCaches()
     return res.status(200).json(new apiResponse(200,categoryCreate,"created  category"))
 })
     
@@ -129,6 +147,7 @@ const createCategory = asyncHandler(async(req,res)=>{
 
         if(!updatedCuisineData) throw new apiError(400, " cuisine updated failed ")
 
+        await invalidateCategoryCaches()
         return res.status(200).json(new apiResponse(200,updatedCuisineData,"mapping of cuisine and category updated successfully"))
     })
 
@@ -139,56 +158,113 @@ const createCategory = asyncHandler(async(req,res)=>{
 
             if(!cuisineName) throw new apiError(400,"cuisine name is required")
 
-            const cuisineData = await prisma.cuisine.findFirst({
-                where:{
-                    OR:[
-                        {name:{equals:cuisineName,mode:"insensitive"}},
-                        {slug:cuisineName.toUpperCase()}
-                    ]
-                },
-                include:{
-                    categories:{
-                        orderBy:{
-                            sortOrderId:"asc"
+            const cacheKey = `catalog:categories:cuisine:${String(cuisineName).toUpperCase()}`
+            const responseData = await getOrSetCachedData(cacheKey,async()=>{
+                const cuisineData = await prisma.cuisine.findFirst({
+                    where:{
+                        OR:[
+                            {name:{equals:cuisineName,mode:"insensitive"}},
+                            {slug:cuisineName.toUpperCase()}
+                        ]
+                    },
+                    include:{
+                        categories:{
+                            orderBy:{
+                                sortOrderId:"asc"
+                            }
                         }
                     }
-                }
-            })
+                })
 
-            if(!cuisineData?.categories && cuisineData) throw new apiError(404,"cuisine categories not found")
+                if(!cuisineData?.categories && cuisineData) throw new apiError(404,"cuisine categories not found")
+                return cuisineData.categories
+            },CATEGORY_CACHE_TTL)
 
-            return res.status(200).json(new apiResponse(200,cuisineData.categories,"categories fetched successfully"))
+            return res.status(200).json(new apiResponse(200,responseData,"categories fetched successfully"))
         })
 
     const fetchAllCategories = asyncHandler(async(req,res)=>{
-            const categories = await prisma.categories.findMany({
-                orderBy:{
-                    sortOrderId:"asc"
-                },
-                include:{
-                    cuisine:{
-                        select:{
-                            id:true,
-                            name:true,
-                            slug:true
+            const pagination = getPagination(req.query,{defaultLimit:50,maxLimit:100})
+            const cacheKey = `catalog:categories:all:page:${pagination.page}:limit:${pagination.limit}`
+            const responseData = await getOrSetCachedData(cacheKey,async()=>{
+                const categories = await prisma.categories.findMany({
+                    skip:pagination.skip,
+                    take:pagination.take,
+                    orderBy:{
+                        sortOrderId:"asc"
+                    },
+                    select:{
+                        id:true,
+                        name:true,
+                        slug:true,
+                        sortOrderId:true,
+                        active:true,
+                        cuisineId:true,
+                        cuisine:{
+                            select:{
+                                id:true,
+                                name:true,
+                                slug:true
+                            }
                         }
                     }
-                }
-            })
-                if(!fetchAllCategories) throw new apiError(404,"categories not found")
+                })
+                const total = await prisma.categories.count()
+                if(!categories) throw new apiError(404,"categories not found")
 
-            return res.status(200).json(new apiResponse(200,categories,"categories fetched successfully"))
+                return {
+                    pagination:buildPaginationMeta({
+                        page:pagination.page,
+                        limit:pagination.limit,
+                        total
+                    }),
+                    categories:categories.map((category)=>({
+                        id:category.id,
+                        name:category.name,
+                        slug:category.slug,
+                        sortOrderId:category.sortOrderId,
+                        active:category.active,
+                        cuisineId:category.cuisineId,
+                        cuisineName:category.cuisine?.name || null
+                    }))
+                }
+            },CATEGORY_CACHE_TTL)
+
+            return res.status(200).json(new apiResponse(200,responseData,"categories fetched successfully"))
     })
 
     const fetchOnlyCategories = asyncHandler(async(req,res)=>{
-            const categories = await prisma.categories.findMany({
-                orderBy:{
-                    sortOrderId:"asc"
-                }
-            })
+            const pagination = getPagination(req.query,{defaultLimit:50,maxLimit:100})
+            const cacheKey = `catalog:categories:only:page:${pagination.page}:limit:${pagination.limit}`
+            const responseData = await getOrSetCachedData(cacheKey,async()=>{
+                const categories = await prisma.categories.findMany({
+                    skip:pagination.skip,
+                    take:pagination.take,
+                    orderBy:{
+                        sortOrderId:"asc"
+                    },
+                    select:{
+                        id:true,
+                        name:true,
+                        slug:true,
+                        sortOrderId:true,
+                        active:true
+                    }
+                })
+                const total = await prisma.categories.count()
 
-            if(!categories) throw new apiError(404,"categories not found")
-            return res.status(200).json(new apiResponse(200,categories,"categories fetched successfully"))
+                if(!categories) throw new apiError(404,"categories not found")
+                return {
+                    pagination:buildPaginationMeta({
+                        page:pagination.page,
+                        limit:pagination.limit,
+                        total
+                    }),
+                    categories
+                }
+            },CATEGORY_CACHE_TTL)
+
+            return res.status(200).json(new apiResponse(200,responseData,"categories fetched successfully"))
     })
 
     const fetchShopCategories = asyncHandler(async(req,res)=>{
@@ -215,50 +291,80 @@ const createCategory = asyncHandler(async(req,res)=>{
                 },
                 select:{
                     id:true,
-                    ownerId:true
+                    ownerId:true,
+                    shopType:{
+                        select:{
+                            features:{
+                                where:{enabled:true},
+                                select:{feature:true}
+                            }
+                        }
+                    },
+                    featureOverrides:{
+                        select:{
+                            feature:true,
+                            enabled:true
+                        }
+                    }
                 }
             })
 
             if(!shop) throw new apiError(404,"shop not found")
+            if(!shopHasFeature(shop,"CATEGORIES")){
+                throw new apiError(403,"categories are not enabled for this shop type")
+            }
             if(currentUser.role !== "ADMIN" && shop.ownerId !== currentUser.id){
                 throw new apiError(403,"You can only fetch categories for your own shop")
             }
 
-            const categories = await prisma.categories.findMany({
-                where:{
-                    active:true,
-                    allItems:{
-                        some:{
-                            active:true,
-                            shopItems:{
-                                some:{
-                                    shopId,
-                                    active:true
+            const cacheKey = `catalog:shop:${shopId}:categories`
+            const responseData = await getOrSetCachedData(cacheKey,async()=>{
+                const categories = await prisma.categories.findMany({
+                    where:{
+                        active:true,
+                        allItems:{
+                            some:{
+                                active:true,
+                                shopItems:{
+                                    some:{
+                                        shopId,
+                                        active:true
+                                    }
                                 }
                             }
                         }
-                    }
-                },
-                orderBy:{
-                    sortOrderId:"asc"
-                },
-                select:{
-                    id:true,
-                    name:true,
-                    slug:true,
-                    sortOrderId:true,
-                    active:true,
-                    cuisine:{
-                        select:{
-                            id:true,
-                            name:true,
-                            slug:true
+                    },
+                    orderBy:{
+                        sortOrderId:"asc"
+                    },
+                    select:{
+                        id:true,
+                        name:true,
+                        slug:true,
+                        sortOrderId:true,
+                        active:true,
+                        cuisine:{
+                            select:{
+                                id:true,
+                                name:true,
+                                slug:true
+                            }
                         }
                     }
-                }
-            })
+                })
 
-            return res.status(200).json(new apiResponse(200,categories,"shop categories fetched successfully"))
+                return categories.map((category)=>({
+                    id:category.id,
+                    name:category.name,
+                    slug:category.slug,
+                    sortOrderId:category.sortOrderId,
+                    active:category.active,
+                    cuisineId:category.cuisine?.id || null,
+                    cuisineName:category.cuisine?.name || null
+                }))
+            },CATEGORY_CACHE_TTL)
+
+            return res.status(200).json(new apiResponse(200,responseData,"shop categories fetched successfully"))
     })
 
 // admin
@@ -325,6 +431,7 @@ const createCategory = asyncHandler(async(req,res)=>{
                 })
             )
 
+            await invalidateCategoryCaches()
             return res.status(200).json(new apiResponse(200,updatedCategories,"categories reordered successfully"))
     })
     
@@ -363,6 +470,7 @@ const createCategory = asyncHandler(async(req,res)=>{
                 data:dataToUpdate
             })
 
+            await invalidateCategoryCaches()
             return res.status(200).json(new apiResponse(200,updatedCategory,"category updated successfully"))
     })
 // admin
@@ -377,6 +485,7 @@ const createCategory = asyncHandler(async(req,res)=>{
                 }
             })
                 
+            await invalidateCategoryCaches()
             return res.status(200).json(new apiResponse(200,deletedCategory,"category deleted successfully"))
     })
     

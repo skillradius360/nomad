@@ -33,7 +33,7 @@ model User {
   completedOffers BuyerCompletedOffer[]
   targetedOffers  OfferBuyer[]
 
-  profileImg String?
+  profileImg     String?
   buyerAdTargets BuyerAdTarget[]
   createdBanners Banner[]
 
@@ -59,8 +59,10 @@ model Shop {
   status         ShopStatus        @default(AUTOMATIC)
   Holidays       String[]          @default(["sunday"])
   Verified       Boolean           @default(false)
-  shopBalance    Int               @default(100)
-  shopCategory   ShopTypes
+  shopBalance    Int               @default(0)
+  totalSlots     Int               @default(0)
+  usedSlots      Int               @default(0)
+  shopTypeId     String?
   billingStatus  ShopBillingStatus @default(TRIAL)
   trialStartedAt DateTime          @default(now())
   trialDays      Int?
@@ -70,24 +72,76 @@ model Shop {
   MinimumDeliveryRate Int? @default(50)
   FreeDeliveryRate    Int? @default(70)
 
-  owner           User                  @relation(fields: [ownerId], references: [id], onDelete: Cascade)
-  orders          Order[]
-  recharges       Recharges[]
-  combos          Combo[]
-  items           ShopItem[]
-  menus           Menu[]
-  timings         ShopTiming[]
-  completedOffers BuyerCompletedOffer[]
-  targetedAds     AdSellerTarget[]
-  offers          Offer[]
+  owner            User                    @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  shopType         ShopType?               @relation(fields: [shopTypeId], references: [id], onDelete: SetNull)
+  orders           Order[]
+  recharges        Recharges[]
+  combos           Combo[]
+  items            ShopItem[]
+  menus            Menu[]
+  timings          ShopTiming[]
+  completedOffers  BuyerCompletedOffer[]
+  targetedAds      AdSellerTarget[]
+  offers           Offer[]
   revenueSummaries ShopRevenueSummary[]
-  banners         Banner[]
+  banners          Banner[]
+  featureOverrides ShopFeatureOverride[]
+  dailyBillings    ShopDailyBilling[]
+  billingLedger    ShopBillingLedger[]
+  orderCommissions OrderCommissionCharge[]
 
   latitude  Float?
   longitude Float?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
+
+  @@index([shopTypeId])
+}
+
+model ShopType {
+  id          String  @id @default(uuid())
+  name        String
+  slug        String  @unique
+  description String?
+  active      Boolean @default(true)
+
+  features ShopTypeFeature[]
+  shops    Shop[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+}
+
+model ShopTypeFeature {
+  id         String         @id @default(uuid())
+  shopTypeId String
+  feature    ShopFeatureKey
+  enabled    Boolean        @default(true)
+
+  shopType ShopType @relation(fields: [shopTypeId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@unique([shopTypeId, feature])
+  @@index([feature, enabled])
+}
+
+model ShopFeatureOverride {
+  id      String         @id @default(uuid())
+  shopId  String
+  feature ShopFeatureKey
+  enabled Boolean        @default(true)
+
+  shop Shop @relation(fields: [shopId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@unique([shopId, feature])
+  @@index([shopId, enabled])
+  @@index([feature, enabled])
 }
 
 model ShopTiming {
@@ -112,28 +166,29 @@ model ShopTiming {
 }
 
 model Order {
-  id                 String        @id @default(uuid())
-  userId             String
-  shopId             String?
-  currentOrderStatus OrderStatus   @default(NEW)
-  paymentMethod      PaymentMethod @default(CASH)
-  paymentReceived    Boolean       @default(false)
-  subtotalAmount     Int           @default(0)
-  discountAmount     Int           @default(0)
-  deliveryAmount     Int           @default(0)
-  deliveryDiscountAmount Int        @default(0)
-  totalAmount        Int           @default(0)
-  paidAmount         Int           @default(0)
-  refundAmount       Int           @default(0)
-  customerNote       String?
-  completedAt        DateTime?
-  cancelledAt        DateTime?
-  refundedAt         DateTime?
+  id                     String        @id @default(uuid())
+  userId                 String
+  shopId                 String?
+  currentOrderStatus     OrderStatus   @default(NEW)
+  paymentMethod          PaymentMethod @default(CASH)
+  paymentReceived        Boolean       @default(false)
+  subtotalAmount         Int           @default(0)
+  discountAmount         Int           @default(0)
+  deliveryAmount         Int           @default(0)
+  deliveryDiscountAmount Int           @default(0)
+  totalAmount            Int           @default(0)
+  paidAmount             Int           @default(0)
+  refundAmount           Int           @default(0)
+  customerNote           String?
+  completedAt            DateTime?
+  cancelledAt            DateTime?
+  refundedAt             DateTime?
 
-  user           User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
-  shop           Shop?                @relation(fields: [shopId], references: [id], onDelete: SetNull)
-  orderItems     OrderItem[]
-  completedOffer BuyerCompletedOffer?
+  user             User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  shop             Shop?                  @relation(fields: [shopId], references: [id], onDelete: SetNull)
+  orderItems       OrderItem[]
+  completedOffer   BuyerCompletedOffer?
+  commissionCharge OrderCommissionCharge?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
@@ -197,17 +252,129 @@ model OTP {
 }
 
 model Recharges {
-  id          String         @id @default(uuid())
-  userId      String
-  shopId      String
-  orderAmount Int
-  status      RechargeStatus @default(PENDING)
+  id                       String         @id @default(uuid())
+  userId                   String
+  shopId                   String
+  orderAmount              Int
+  requestedSlots           Int            @default(0)
+  requestedDays            Int?
+  slotPriceSnapshot        Int            @default(0)
+  commissionBpsSnapshot    Int            @default(0)
+  estimatedDailyCommission Int            @default(0)
+  paymentTransferDone      Boolean        @default(false)
+  paymentReference         String?
+  status                   RechargeStatus @default(PENDING)
+  approvedAt               DateTime?
+  rejectedAt               DateTime?
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
   shop Shop @relation(fields: [shopId], references: [id], onDelete: Cascade)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
+}
+
+model BillingSettings {
+  id                  String   @id @default("default")
+  dailySlotPrice      Int      @default(0)
+  commissionBps       Int      @default(0)
+  estimationBufferBps Int      @default(0)
+  updatedById         String?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @default(now()) @updatedAt
+}
+
+model RechargeDayOption {
+  id        String   @id @default(uuid())
+  days      Int      @unique
+  active    Boolean  @default(true)
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+}
+
+model RechargeAmountOption {
+  id        String   @id @default(uuid())
+  amount    Int      @unique
+  active    Boolean  @default(true)
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+}
+
+model OrderCommissionCharge {
+  id                 String           @id @default(uuid())
+  orderId            String           @unique
+  shopId             String
+  orderValue         Int
+  commissionBps      Int
+  commissionAmount   Int
+  refundedCommission Int              @default(0)
+  pendingAdjustment  Int              @default(0)
+  status             CommissionStatus @default(PENDING)
+  completedAt        DateTime
+  settledAt          DateTime?
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  shop  Shop  @relation(fields: [shopId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@index([shopId, status, completedAt])
+  @@index([shopId, pendingAdjustment])
+}
+
+model ShopDailyBilling {
+  id                         String   @id @default(uuid())
+  shopId                     String
+  billingDate                DateTime
+  totalSlots                 Int
+  dailySlotPrice             Int
+  slotCharge                 Int
+  completedOrderValue        Int      @default(0)
+  commissionBps              Int
+  commissionCharge           Int      @default(0)
+  commissionRefundAdjustment Int      @default(0)
+  totalCharge                Int
+  openingBalance             Int
+  closingBalance             Int
+
+  shop Shop @relation(fields: [shopId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@unique([shopId, billingDate])
+  @@index([billingDate])
+}
+
+model ShopBillingLedger {
+  id           String                @id @default(uuid())
+  shopId       String
+  entryType    ShopBillingLedgerType
+  amount       Int
+  balanceAfter Int
+  referenceKey String                @unique
+  description  String?
+  occurredAt   DateTime              @default(now())
+
+  shop Shop @relation(fields: [shopId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@index([shopId, occurredAt])
+}
+
+model CompanyRevenueDaily {
+  id                          String   @id @default(uuid())
+  revenueDate                 DateTime @unique
+  slotRevenue                 Int      @default(0)
+  orderCommissionRevenue      Int      @default(0)
+  commissionRefundAdjustments Int      @default(0)
+  totalRevenue                Int      @default(0)
+  createdAt                   DateTime @default(now())
+  updatedAt                   DateTime @default(now()) @updatedAt
 }
 
 model Ad {
@@ -382,10 +549,7 @@ model Combo {
   description String?
   imageUrl    String?
 
-  totalPrice         Int
-  discount           Int   @default(0)
-  finalPrice         Int?
-  percentageDiscount Float @default(0.0)
+  totalPrice Int
 
   cuisineId  String?
   categoryId String?
@@ -398,10 +562,10 @@ model Combo {
   cuisine  Cuisine?    @relation(fields: [cuisineId], references: [id], onDelete: SetNull)
   category Categories? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
 
-  items      ComboItem[]
-  menuCombos MenuCombo[]
-  orderItems OrderItem[]
-  tags       ComboTag[]
+  items       ComboItem[]
+  menuCombos  MenuCombo[]
+  orderItems  OrderItem[]
+  tags        ComboTag[]
   offerCombos OfferCombo[]
 
   createdAt DateTime @default(now())
@@ -416,8 +580,8 @@ model Tag {
   slug   String  @unique
   active Boolean @default(true)
 
-  itemTags  ItemTag[]
-  comboTags ComboTag[]
+  itemTags          ItemTag[]
+  comboTags         ComboTag[]
   offerAudienceTags OfferAudienceTag[]
 
   createdAt DateTime @default(now())
@@ -475,10 +639,10 @@ model Menu {
   active      Boolean @default(true)
   sortOrderId Int?
 
-  shop      Shop           @relation(fields: [shopId], references: [id], onDelete: Cascade)
-  schedules MenuSchedule[]
-  items     MenuItem[]
-  combos    MenuCombo[]
+  shop       Shop           @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  schedules  MenuSchedule[]
+  items      MenuItem[]
+  combos     MenuCombo[]
   offerMenus OfferMenu[]
 
   createdAt DateTime @default(now())
@@ -564,12 +728,12 @@ model Offer {
   rewardQuantity    Int?
   imageUrl          String?
 
-  shop     Shop                @relation(fields: [shopId], references: [id], onDelete: Cascade)
-  menus    OfferMenu[]
-  items    OfferItem[]
-  combos   OfferCombo[]
-  buyers   OfferBuyer[]
-  tags     OfferAudienceTag[]
+  shop   Shop               @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  menus  OfferMenu[]
+  items  OfferItem[]
+  combos OfferCombo[]
+  buyers OfferBuyer[]
+  tags   OfferAudienceTag[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
@@ -598,7 +762,7 @@ model OfferItem {
   shopItemId String
   role       OfferSelectionRole @default(APPLIES_TO)
 
-  offer   Offer    @relation(fields: [offerId], references: [id], onDelete: Cascade)
+  offer    Offer    @relation(fields: [offerId], references: [id], onDelete: Cascade)
   shopItem ShopItem @relation(fields: [shopItemId], references: [id], onDelete: Cascade)
 
   createdAt DateTime @default(now())
@@ -651,18 +815,18 @@ model OfferAudienceTag {
 }
 
 model ShopRevenueSummary {
-  id               String            @id @default(uuid())
-  shopId           String
-  periodType       RevenuePeriodType
-  periodDate       DateTime
+  id         String            @id @default(uuid())
+  shopId     String
+  periodType RevenuePeriodType
+  periodDate DateTime
 
-  successfulOrders Int               @default(0)
-  cancelledOrders  Int               @default(0)
-  grossRevenue     Int               @default(0)
-  discountAmount   Int               @default(0)
-  deliveryRevenue  Int               @default(0)
-  refundAmount     Int               @default(0)
-  netRevenue       Int               @default(0)
+  successfulOrders Int @default(0)
+  cancelledOrders  Int @default(0)
+  grossRevenue     Int @default(0)
+  discountAmount   Int @default(0)
+  deliveryRevenue  Int @default(0)
+  refundAmount     Int @default(0)
+  netRevenue       Int @default(0)
 
   shop Shop @relation(fields: [shopId], references: [id], onDelete: Cascade)
 
@@ -695,6 +859,7 @@ enum ShopBillingStatus {
   TRIAL
   ACTIVE
   PAYMENT_DUE
+  HOLD
 }
 
 enum ShopStatus {
@@ -709,9 +874,24 @@ enum RechargeStatus {
   REJECTED
 }
 
-enum ShopTypes {
-  FASTFOOD
-  VEGETABLES
+enum CommissionStatus {
+  PENDING
+  SETTLED
+}
+
+enum ShopBillingLedgerType {
+  RECHARGE
+  DAILY_CHARGE
+  REFUND_ADJUSTMENT
+  ADMIN_ADJUSTMENT
+}
+
+enum ShopFeatureKey {
+  ITEMS
+  CATEGORIES
+  CUISINE
+  MENUS
+  COMBOS
 }
 
 enum AdPlacement {

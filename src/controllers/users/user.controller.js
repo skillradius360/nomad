@@ -487,9 +487,7 @@ const fetchAllUserOverviewData = asyncHandler(async(req,res)=>{
         },
         unavailable:{
             activeChats:"No chat model found in current Prisma schema",
-            notificationsSent:"No notification model found in current Prisma schema",
-            activeSlotsPeak:"No slot package model found in current Prisma schema",
-            orderCommission:"No commission field or model found in current Prisma schema"
+            notificationsSent:"No notification model found in current Prisma schema"
         }
     };
 
@@ -685,7 +683,7 @@ const editOwnUserData = asyncHandler(async (req, res) => {
         .json(new apiResponse(200, user, "User data updated successfully"));
 });
 // admin
-const SuspendUser = asyncHandler(async (req, res) => {
+const toggleUserSuspension = asyncHandler(async (req, res) => {
     const id = req.params.userId;
 
     if (!id) {
@@ -698,6 +696,7 @@ const SuspendUser = asyncHandler(async (req, res) => {
         },
         select: {
             id: true,
+            isBlocked: true,
         },
     });
 
@@ -710,13 +709,23 @@ const SuspendUser = asyncHandler(async (req, res) => {
             id,
         },
         data: {
+            isBlocked: !existingUser.isBlocked,
+        },
+        select: {
+            id: true,
+            name: true,
+            email: true,
+            phone: true,
+            role: true,
             isBlocked: true,
         },
     });
 
+    const action = user.isBlocked ? "suspended" : "unsuspended";
+
     return res
         .status(200)
-        .json(new apiResponse(200, user, "User suspended successfully"));
+        .json(new apiResponse(200, user, `User ${action} successfully`));
 });
 // admin
 const fetchAllSellers = asyncHandler(async(req,res)=>{
@@ -755,4 +764,4 @@ const fetchAllBuyers= asyncHandler(async(req,res)=>{
 })
 
 
-export { fetchAllUsers, fetchAllUserOverviewData, fetchUserProfile, deleteUser, editUserData, editOwnUserData, SuspendUser ,fetchAllSellers,fetchAllBuyers};
+export { fetchAllUsers, fetchAllUserOverviewData, fetchUserProfile, deleteUser, editUserData, editOwnUserData, toggleUserSuspension ,fetchAllSellers,fetchAllBuyers};

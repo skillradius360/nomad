@@ -5,7 +5,11 @@
   "type": "module",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "npm run test:billing",
+    "test:billing": "node -r dotenv/config scripts/test-billing-api.mjs",
+    "test:billing:settlement": "node -r dotenv/config scripts/test-billing-api.mjs",
+    "test:postman:billing": "node -r dotenv/config scripts/run-postman-billing.mjs",
+    "postman:sync:billing-tests": "node scripts/update-postman-billing-tests.cjs",
     "dev": "nodemon -r dotenv/config --experimental-json-modules src/app.js",
     "start": "node -r dotenv/config --experimental-json-modules src/app.js"
   },
@@ -22,6 +26,7 @@
     "express": "^5.2.1",
     "express-session": "^1.19.0",
     "google-auth-library": "^10.6.2",
+    "ioredis": "^5.11.1",
     "jsonwebtoken": "^9.0.3",
     "multer": "^2.1.1",
     "nodemon": "^3.1.14",
@@ -29,5 +34,8 @@
     "prisma": "^7.8.0",
     "twilio": "^6.0.2",
     "uuid": "^14.0.0"
+  },
+  "devDependencies": {
+    "newman": "^6.2.2"
   }
 }

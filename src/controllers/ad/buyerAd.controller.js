@@ -1,8 +1,14 @@
 import { prisma } from "../../db/index.js";
 import { cloudUploader } from "../../utils/cloudinary.upload.js";
+import { deleteCacheByPattern, getOrSetCachedData } from "../../utils/cache.js";
 import { apiError, apiResponse, asyncHandler } from "../../utils/handler.js";
 
 const adTargets = ["GLOBAL", "INDIVIDUAL"];
+const BUYER_SIDE_AD_CACHE_TTL = 45;
+
+const invalidateBuyerSideAdCaches = async()=>{
+    await deleteCacheByPattern("buyer:*:buyer-side-ads");
+};
 
 const parseJsonArray = (value, fieldName) => {
     if (!value) return [];
@@ -62,6 +68,17 @@ const formatBuyerAd = (ad) => ({
     buyerTargets: ad.buyerTargets?.map((target) => target.buyer) || [],
 });
 
+const buyerSideAdSelect = {
+    id:true,
+    name:true,
+    description:true,
+    imageUrl:true,
+    linkUrl:true,
+    target:true,
+    startsAt:true,
+    endsAt:true
+};
+
 const createBuyerAd = asyncHandler(async (req, res) => {
     const {
         name,
@@ -120,6 +137,7 @@ const createBuyerAd = asyncHandler(async (req, res) => {
         },
     });
 
+    await invalidateBuyerSideAdCaches();
     return res.status(201).json(new apiResponse(201, formatBuyerAd(buyerAd), "buyer ad created successfully"));
 });
 
@@ -267,6 +285,7 @@ const updateBuyerAd = asyncHandler(async (req, res) => {
         });
     });
 
+    await invalidateBuyerSideAdCaches();
     return res.status(200).json(new apiResponse(200, formatBuyerAd(buyerAd), "buyer ad updated successfully"));
 });
 
@@ -287,6 +306,7 @@ const updateBuyerAdActiveStatus = asyncHandler(async (req, res) => {
 
     if (!buyerAd) throw new apiError(404, "buyer ad not found");
 
+    await invalidateBuyerSideAdCaches();
     return res.status(200).json(new apiResponse(200, buyerAd, `buyer ad ${active ? "activated" : "deactivated"} successfully`));
 });
 
@@ -310,6 +330,7 @@ const deleteBuyerAd = asyncHandler(async (req, res) => {
         },
     });
 
+    await invalidateBuyerSideAdCaches();
     return res.status(200).json(new apiResponse(200, null, "buyer ad deleted successfully"));
 });
 
@@ -317,33 +338,37 @@ const fetchBuyerSideAds = asyncHandler(async (req, res) => {
     const buyerId = req.userData?.id;
     const now = new Date();
 
-    const ads = await prisma.buyerAds.findMany({
-        where: {
-            active: true,
-            startsAt: {
-                lte: now,
-            },
-            endsAt: {
-                gt: now,
-            },
-            OR: [
-                {
-                    target: "GLOBAL",
+    const cacheKey = `buyer:${buyerId}:buyer-side-ads`;
+    const ads = await getOrSetCachedData(cacheKey,async()=>{
+        return prisma.buyerAds.findMany({
+            where: {
+                active: true,
+                startsAt: {
+                    lte: now,
                 },
-                {
-                    target: "INDIVIDUAL",
-                    buyerTargets: {
-                        some: {
-                            buyerId,
+                endsAt: {
+                    gt: now,
+                },
+                OR: [
+                    {
+                        target: "GLOBAL",
+                    },
+                    {
+                        target: "INDIVIDUAL",
+                        buyerTargets: {
+                            some: {
+                                buyerId,
+                            },
                         },
                     },
-                },
-            ],
-        },
-        orderBy: {
-            createdAt: "desc",
-        },
-    });
+                ],
+            },
+            orderBy: {
+                createdAt: "desc",
+            },
+            select:buyerSideAdSelect
+        });
+    },BUYER_SIDE_AD_CACHE_TTL);
 
     return res.status(200).json(new apiResponse(200, ads, "buyer side ads fetched successfully"));
 });

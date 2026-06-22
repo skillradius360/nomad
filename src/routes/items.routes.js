@@ -17,6 +17,7 @@ import {
 import { isAdmin, isAdminOrSeller, isSeller } from "../middleware/admin.middleware.js";
 import { verifyJWT } from "../middleware/auth.middleware.js";
 import { upload } from "../middleware/multer.middleware.js";
+import { buyerReadRateLimit, expensiveReadRateLimit, uploadRateLimit, writeRateLimit } from "../middleware/rateLimit.middleware.js";
 
 export const itemRouter = Router();
 const itemImageUpload = upload.fields([
@@ -25,16 +26,16 @@ const itemImageUpload = upload.fields([
 
 itemRouter.use(verifyJWT);
 
-itemRouter.route("/").get(fetchAllItems);
-itemRouter.route("/create").post(isAdminOrSeller, itemImageUpload, createItems);
-itemRouter.route("/map").post(isAdmin, mapItems);
-itemRouter.route("/custom").post(isSeller, itemImageUpload, addPersonalProduct);
-itemRouter.route("/reorder").patch(isAdmin, reorderItems);
-itemRouter.route("/shop-items/reorder").patch(isAdminOrSeller, reorderShopItems);
-itemRouter.route("/fetchallitems").get(fetchAllItems);
-itemRouter.route("/only").get(fetchOnlyItems);
-itemRouter.route("/shop-items/:shopItemId").patch(itemImageUpload, editShopItem).delete(deleteShopItem);
-itemRouter.route("/shop/:shopId").get(fetchItemsByShop);
-itemRouter.route("/category").get(fetchItemsToCategory);
-itemRouter.route("/category/:categoryName").get(fetchItemsToCategory);
-itemRouter.route("/:itemId").patch(isAdmin, itemImageUpload, editItem).delete(isAdmin, deleteItem);
+itemRouter.route("/").get(expensiveReadRateLimit, fetchAllItems);
+itemRouter.route("/create").post(isAdminOrSeller, uploadRateLimit, itemImageUpload, createItems);
+itemRouter.route("/map").post(isAdmin, writeRateLimit, mapItems);
+itemRouter.route("/custom").post(isSeller, uploadRateLimit, itemImageUpload, addPersonalProduct);
+itemRouter.route("/reorder").patch(isAdmin, writeRateLimit, reorderItems);
+itemRouter.route("/shop-items/reorder").patch(isAdminOrSeller, writeRateLimit, reorderShopItems);
+itemRouter.route("/fetchallitems").get( fetchAllItems);
+itemRouter.route("/only").get(buyerReadRateLimit, fetchOnlyItems);
+itemRouter.route("/shop-items/:shopItemId").patch(uploadRateLimit, itemImageUpload, editShopItem).delete(writeRateLimit, deleteShopItem);
+itemRouter.route("/shop/:shopId").get(buyerReadRateLimit, fetchItemsByShop);
+itemRouter.route("/category").get(expensiveReadRateLimit, fetchItemsToCategory);
+itemRouter.route("/category/:categoryName").get(expensiveReadRateLimit, fetchItemsToCategory);
+itemRouter.route("/:itemId").patch(isAdmin, uploadRateLimit, itemImageUpload, editItem).delete(isAdmin, writeRateLimit, deleteItem);

@@ -1,5 +1,20 @@
 import { prisma } from "../../db/index.js";
+import { deleteCacheByPattern, getOrSetCachedData } from "../../utils/cache.js";
 import { apiError, apiResponse, asyncHandler } from "../../utils/handler.js";
+import { buildPaginationMeta, getPagination } from "../../utils/pagination.js";
+import { shopHasFeature } from "../../utils/shopFeatures.js";
+
+const CUISINE_CACHE_TTL = 60;
+const CUISINE_CACHE_PATTERNS = [
+    "catalog:cuisines:*",
+    "catalog:shop:*:cuisines"
+];
+
+const invalidateCuisineCaches = async()=>{
+    for(const pattern of CUISINE_CACHE_PATTERNS){
+        await deleteCacheByPattern(pattern);
+    }
+};
 
 // admin
 const createCuisine = asyncHandler(async(req,res)=>{
@@ -26,6 +41,7 @@ const createCuisine = asyncHandler(async(req,res)=>{
         throw new apiError(400,"cuisine creation failure")
     }
 
+    await invalidateCuisineCaches()
     return res.status(201).json(new apiResponse(201,cuisineCreate,"cuisine created successfully"))
     
 
@@ -33,42 +49,100 @@ const createCuisine = asyncHandler(async(req,res)=>{
 
 // user and admin
 const fetchAllCuisines = asyncHandler(async(req,res)=>{
-    const cuisines = await prisma.cuisine.findMany({
-        orderBy:{
-            sortOrderId:"asc"
-        },
-        include:{
-            categories:{
+    const pagination = getPagination(req.query,{defaultLimit:50,maxLimit:100})
+    const cacheKey = `catalog:cuisines:all:page:${pagination.page}:limit:${pagination.limit}`
+    const responseData = await getOrSetCachedData(cacheKey,async()=>{
+        const [cuisines,total] = await Promise.all([
+            prisma.cuisine.findMany({
+                skip:pagination.skip,
+                take:pagination.take,
                 orderBy:{
                     sortOrderId:"asc"
                 },
-                include:{
-                    allItems:{
+                select:{
+                    id:true,
+                    name:true,
+                    slug:true,
+                    sortOrderId:true,
+                    active:true,
+                    categories:{
                         orderBy:{
                             sortOrderId:"asc"
+                        },
+                        select:{
+                            id:true,
+                            name:true,
+                            slug:true,
+                            sortOrderId:true,
+                            active:true
                         }
                     }
                 }
-            }
-        }
-    })
+            }),
+            prisma.cuisine.count()
+        ])
 
-    if(!cuisines) throw new apiError(404,"cuisines not found")
-    return res.status(200).json(new apiResponse(200,cuisines,"cuisines fetched successfully"))
+        if(!cuisines) throw new apiError(404,"cuisines not found")
+        return {
+            pagination:buildPaginationMeta({
+                page:pagination.page,
+                limit:pagination.limit,
+                total
+            }),
+            cuisines:cuisines.map((cuisine)=>({
+                id:cuisine.id,
+                name:cuisine.name,
+                slug:cuisine.slug,
+                sortOrderId:cuisine.sortOrderId,
+                active:cuisine.active,
+                categories:cuisine.categories.map((category)=>({
+                    id:category.id,
+                    name:category.name,
+                    slug:category.slug,
+                    sortOrderId:category.sortOrderId,
+                    active:category.active
+                }))
+            }))
+        }
+    },CUISINE_CACHE_TTL)
+    return res.status(200).json(new apiResponse(200,responseData,"cuisines fetched successfully"))
 })
 
 // user and admin
 const fetchOnlyCuisines = asyncHandler(async(req,res)=>{
-    const cuisines = await prisma.cuisine.findMany({
-        orderBy:{
-            sortOrderId:"asc"
+    const pagination = getPagination(req.query,{defaultLimit:50,maxLimit:100})
+    const cacheKey = `catalog:cuisines:only:page:${pagination.page}:limit:${pagination.limit}`
+    const responseData = await getOrSetCachedData(cacheKey,async()=>{
+        const [cuisines,total] = await Promise.all([
+            prisma.cuisine.findMany({
+                skip:pagination.skip,
+                take:pagination.take,
+                orderBy:{
+                    sortOrderId:"asc"
+                },
+                select:{
+                    id:true,
+                    name:true,
+                    slug:true,
+                    sortOrderId:true,
+                    active:true
+                }
+            }),
+            prisma.cuisine.count()
+        ])
+
+        if(!cuisines) throw new apiError(404,"cuisines not found")
+        return {
+            pagination:buildPaginationMeta({
+                page:pagination.page,
+                limit:pagination.limit,
+                total
+            }),
+            cuisines
         }
-    })
-
-    if(!cuisines) throw new apiError(404,"cuisines not found")
-    return res.status(200).json(new apiResponse(200,cuisines,"cuisines fetched successfully"))
+    },CUISINE_CACHE_TTL)
+    return res.status(200).json(new apiResponse(200,responseData,"cuisines fetched successfully"))
 })
-
 // admin and seller
 const fetchShopCuisines = asyncHandler(async(req,res)=>{
     const shopId = req.params.shopId || req.query.shopId
@@ -95,46 +169,66 @@ const fetchShopCuisines = asyncHandler(async(req,res)=>{
         select:{
             id:true,
             shopName:true,
-            ownerId:true
+            ownerId:true,
+            shopType:{
+                select:{
+                    features:{
+                        where:{enabled:true},
+                        select:{feature:true}
+                    }
+                }
+            },
+            featureOverrides:{
+                select:{
+                    feature:true,
+                    enabled:true
+                }
+            }
         }
     })
 
     if(!shop) throw new apiError(404,"shop not found")
+    if(!shopHasFeature(shop,"CUISINE")){
+        throw new apiError(403,"cuisine is not enabled for this shop type")
+    }
     if(currentUser.role !== "ADMIN" && shop.ownerId !== currentUser.id){
         throw new apiError(403,"You can only fetch cuisines for your own shop")
     }
 
-    const cuisines = await prisma.cuisine.findMany({
-        where:{
-            active:true,
-            categories:{
-                some:{
-                    active:true,
-                    allItems:{
-                        some:{
-                            active:true,
-                            shopItems:{
-                                some:{
-                                    shopId,
-                                    active:true
+    const cacheKey = `catalog:shop:${shopId}:cuisines`
+    const cuisines = await getOrSetCachedData(cacheKey,async()=>{
+        return prisma.cuisine.findMany({
+            where:{
+                active:true,
+                categories:{
+                    some:{
+                        active:true,
+                        allItems:{
+                            some:{
+                                active:true,
+                                shopItems:{
+                                    some:{
+                                        shopId,
+                                        active:true
+                                    }
                                 }
                             }
                         }
                     }
                 }
+            },
+            orderBy:{
+                sortOrderId:"asc"
+            },
+            select:{
+                id:true,
+                name:true,
+                slug:true,
+                sortOrderId:true,
+                                    active:true
             }
-        },
-        orderBy:{
-            sortOrderId:"asc"
-        },
-        select:{
-            id:true,
-            name:true,
-            slug:true,
-            sortOrderId:true,
-            active:true
-        }
-    })
+        })
+    },CUISINE_CACHE_TTL)
 
     return res.status(200).json(new apiResponse(200,cuisines,"shop cuisines fetched successfully"))
 })
@@ -181,6 +275,7 @@ const reorderCuisines = asyncHandler(async(req,res)=>{
         })
     )
 
+    await invalidateCuisineCaches()
     return res.status(200).json(new apiResponse(200,updatedCuisines,"cuisines reordered successfully"))
 })
 
@@ -218,6 +313,7 @@ const editCuisine = asyncHandler(async(req,res)=>{
         data:dataToUpdate
     })
 
+    await invalidateCuisineCaches()
     return res.status(200).json(new apiResponse(200,updatedCuisine,"cuisine updated successfully"))
 })
 
@@ -233,6 +329,7 @@ const deleteCuisine = asyncHandler(async(req,res)=>{
         }
     })
 
+    await invalidateCuisineCaches()
     return res.status(200).json(new apiResponse(200,deletedCuisine,"cuisine deleted successfully"))
 })
 

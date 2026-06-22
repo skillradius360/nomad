@@ -2,6 +2,7 @@ import { Router } from "express";
 import { upload } from "../middleware/multer.middleware.js";
 import { isAdmin, isAdminOrSeller, isBuyer, isSeller } from "../middleware/admin.middleware.js";
 import { verifyJWT } from "../middleware/auth.middleware.js";
+import { buyerReadRateLimit, expensiveReadRateLimit, uploadRateLimit, writeRateLimit } from "../middleware/rateLimit.middleware.js";
 import {
     createShop,
     deleteSeller,
@@ -25,16 +26,16 @@ export const shopRouter = Router();
 
 shopRouter.use(verifyJWT);
 
-shopRouter.route("/start/:shopId").patch(isAdmin, makeSellerGoLive);
-shopRouter.route("/nearby").get(isBuyer, findNearbyShops);
-shopRouter.route("/:shopId/trial").patch(isAdmin, setShopTrialPeriod);
-shopRouter.route("/:shopId/timings").patch(isAdminOrSeller, setShopTimings);
-shopRouter.route("/:shopId/status").patch(isAdminOrSeller, setShopStatus);
-shopRouter.route("/:shopId/settings").patch(isAdminOrSeller, upload.fields([{ name: "shopimg", maxCount: 1 }]), editShopSettings);
-shopRouter.route("/find/:shopId").get( findFullShopData);
-shopRouter.route("/findshop/:slug").get( findByShopSlug);
-shopRouter.route("/revoke/:shopId").delete(isAdmin, deleteSeller);
-shopRouter.route("/create").post(isAdminOrSeller, upload.fields([{ name: "shopimg", maxCount: 1 }]), createShop);
+shopRouter.route("/start/:shopId").patch(isAdmin, writeRateLimit, makeSellerGoLive);
+shopRouter.route("/nearby").get(isBuyer, buyerReadRateLimit, findNearbyShops);
+shopRouter.route("/:shopId/trial").patch(isAdmin, writeRateLimit, setShopTrialPeriod);
+shopRouter.route("/:shopId/timings").patch(isAdminOrSeller, writeRateLimit, setShopTimings);
+shopRouter.route("/:shopId/status").patch(isAdminOrSeller, writeRateLimit, setShopStatus);
+shopRouter.route("/:shopId/settings").patch(isAdminOrSeller, uploadRateLimit, upload.fields([{ name: "shopimg", maxCount: 1 }]), editShopSettings);
+shopRouter.route("/find/:shopId").get(buyerReadRateLimit, findFullShopData);
+shopRouter.route("/findshop/:slug").get(buyerReadRateLimit, findByShopSlug);
+shopRouter.route("/revoke/:shopId").delete(isAdmin, writeRateLimit, deleteSeller);
+shopRouter.route("/create").post(isAdminOrSeller, uploadRateLimit, upload.fields([{ name: "shopimg", maxCount: 1 }]), createShop);
 
 
 

@@ -1,5 +1,6 @@
 import { prisma } from "../../db/index.js";
 import { cloudUploader } from "../../utils/cloudinary.upload.js";
+import { deleteCacheByPattern, getOrSetCachedData } from "../../utils/cache.js";
 import { apiError, apiResponse, asyncHandler } from "../../utils/handler.js";
 
 const placements = ["SELLER_DASHBOARD", "SELLER_HOME", "BUYER_EXPLORE", "BUYER_SHOP_PAGE"];
@@ -19,8 +20,31 @@ const placementCheckboxMap = {
     BUYER_SHOP_PAGE: ["BUYER_SHOP_PAGE", "buyerShopPage"],
 };
 const allPlacementRequests = ["ALL", "EVERYTHING"];
+const AD_CACHE_TTL = 45;
+const AD_CACHE_PATTERNS = [
+    "buyer:ads:*",
+    "seller:ads:*",
+    "public:ads:*"
+];
+
+const invalidateAdCaches = async()=>{
+    for(const pattern of AD_CACHE_PATTERNS){
+        await deleteCacheByPattern(pattern);
+    }
+};
 
 const isChecked = (value) => ["true", "1", "on", "yes"].includes(String(value).toLowerCase());
+
+const formatPublicAd = (ad, requestedPlacement)=>({
+    id:ad.id,
+    name:ad.name,
+    description:ad.description,
+    imageUrl:requestedPlacement ? ad[placementImageMap[requestedPlacement]] || ad.imageUrl : ad.imageUrl,
+    linkUrl:ad.linkUrl,
+    placement:requestedPlacement || ad.placement,
+    startsAt:ad.startsAt,
+    endsAt:ad.endsAt
+});
 
 const parseSelectedPlacements = (selectedPlacements, placement, body) => {
     const checkboxPlacements = placements.filter((adPlacement) => (
@@ -148,6 +172,7 @@ const createAd = asyncHandler(async (req, res) => {
         },
     });
     if(!ad) throw new apiError(401, "ad creation failure")
+    await invalidateAdCaches();
     return res.status(201).json(new apiResponse(201, ad, "ad created successfully"));
 });
 
@@ -167,7 +192,9 @@ const fetchActiveAds = asyncHandler(async (req, res) => {
         throw new apiError(400, "valid ad placement is required");
     }
 
-    const ads = await prisma.ad.findMany({
+    const cacheKey = `public:ads:${String(shopId || "all")}:${requestedPlacement || "all"}:${fetchEverything ? "everything" : "filtered"}`;
+    const data = await getOrSetCachedData(cacheKey,async()=>{
+        const ads = await prisma.ad.findMany({
         where: {
             active: true,
             startsAt: { lte: now },
@@ -203,24 +230,12 @@ const fetchActiveAds = asyncHandler(async (req, res) => {
         orderBy: {
             createdAt: "desc",
         },
-    });
+        });
 
-    const data = (!fetchEverything && hasSpecificPlacement)
-        ? ads.map((ad) => {
-            const {
-                sellerDashboardImageUrl,
-                sellerHomeImageUrl,
-                buyerExploreImageUrl,
-                buyerShopPageImageUrl,
-                ...adData
-            } = ad;
-
-            return {
-                ...adData,
-                imageUrl: ad[placementImageMap[requestedPlacement]] || ad.imageUrl,
-            };
-        })
-        : ads;
+        return (!fetchEverything && hasSpecificPlacement)
+            ? ads.map((ad) => formatPublicAd(ad, requestedPlacement))
+            : ads.map((ad) => formatPublicAd(ad));
+    },AD_CACHE_TTL);
 
     return res.status(200).json(new apiResponse(200, data, "ads fetched successfully"));
 });
@@ -246,7 +261,9 @@ const fetchSellerAds = asyncHandler(async (req, res) => {
 
     const sellerShopIds = shops.map((shop) => shop.id);
 
-    const ads = await prisma.ad.findMany({
+    const cacheKey = `seller:ads:${sellerId}:${requestedPlacement || "all"}`;
+    const data = await getOrSetCachedData(cacheKey,async()=>{
+        const ads = await prisma.ad.findMany({
         where: {
             active: true,
             startsAt: { lte: now },
@@ -284,24 +301,12 @@ const fetchSellerAds = asyncHandler(async (req, res) => {
         orderBy: {
             createdAt: "desc",
         },
-    });
+        });
 
-    const data = hasSpecificPlacement
-        ? ads.map((ad) => {
-            const {
-                sellerDashboardImageUrl,
-                sellerHomeImageUrl,
-                buyerExploreImageUrl,
-                buyerShopPageImageUrl,
-                ...adData
-            } = ad;
-
-            return {
-                ...adData,
-                imageUrl: ad[placementImageMap[requestedPlacement]] || ad.imageUrl,
-            };
-        })
-        : ads;
+        return hasSpecificPlacement
+            ? ads.map((ad) => formatPublicAd(ad, requestedPlacement))
+            : ads.map((ad) => formatPublicAd(ad));
+    },AD_CACHE_TTL);
 
     return res.status(200).json(new apiResponse(
         200,
@@ -320,7 +325,9 @@ const fetchBuyerAds = asyncHandler(async (req, res) => {
         throw new apiError(400, "valid buyer ad placement is required");
     }
 
-    const ads = await prisma.ad.findMany({
+    const cacheKey = `buyer:ads:${String(shopId || "all")}:${requestedPlacement || "all"}`;
+    const data = await getOrSetCachedData(cacheKey,async()=>{
+        const ads = await prisma.ad.findMany({
         where: {
             active: true,
             startsAt: { lte: now },
@@ -356,24 +363,12 @@ const fetchBuyerAds = asyncHandler(async (req, res) => {
         orderBy: {
             createdAt: "desc",
         },
-    });
+        });
 
-    const data = hasSpecificPlacement
-        ? ads.map((ad) => {
-            const {
-                sellerDashboardImageUrl,
-                sellerHomeImageUrl,
-                buyerExploreImageUrl,
-                buyerShopPageImageUrl,
-                ...adData
-            } = ad;
-
-            return {
-                ...adData,
-                imageUrl: ad[placementImageMap[requestedPlacement]] || ad.imageUrl,
-            };
-        })
-        : ads;
+        return hasSpecificPlacement
+            ? ads.map((ad) => formatPublicAd(ad, requestedPlacement))
+            : ads.map((ad) => formatPublicAd(ad));
+    },AD_CACHE_TTL);
 
     return res.status(200).json(new apiResponse(
         200,
@@ -413,6 +408,7 @@ const updateAdActiveStatus = asyncHandler(async (req, res) => {
 
     if(!ad) throw new apiError(401, "Ad status updation failed!")
 
+    await invalidateAdCaches();
     return res.status(200).json(new apiResponse(200, ad, `ad ${active ? "activated" : "deactivated"} successfully`));
 });
 
@@ -438,6 +434,7 @@ const deleteAd = asyncHandler(async (req, res) => {
         },
     });
 
+    await invalidateAdCaches();
     return res.status(200).json(new apiResponse(200, null, "ad deleted successfully"));
 });
 

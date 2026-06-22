@@ -1,6 +1,26 @@
 import { prisma } from "../../db/index.js";
 import { apiError, apiResponse, asyncHandler } from "../../utils/handler.js";
 import { cloudUploader } from "../../utils/cloudinary.upload.js";
+import { deleteCacheByPattern, getOrSetCachedData } from "../../utils/cache.js";
+import { buildPaginationMeta, getPagination } from "../../utils/pagination.js";
+import { shopHasFeature } from "../../utils/shopFeatures.js";
+import { releaseShopSlot, reserveShopSlot } from "../../utils/billing.js";
+
+const MASTER_ITEMS_CACHE_TTL = 120;
+const SHOP_ITEMS_CACHE_TTL = 45;
+
+const invalidateMasterItemCaches = async({includeShopItems = true} = {})=>{
+    const invalidations = [deleteCacheByPattern("catalog:master:items:*")];
+    if(includeShopItems){
+        invalidations.push(deleteCacheByPattern("catalog:shop:*:items:*"));
+    }
+    await Promise.all(invalidations);
+};
+
+const invalidateShopItemCaches = async(shopId)=>{
+    if(!shopId) return;
+    await deleteCacheByPattern(`catalog:shop:${shopId}:items:*`);
+};
 
 const masterItemInclude = {
     category:{
@@ -32,7 +52,6 @@ const shopItemInclude = {
 
 const shopItemListSelect = {
     id:true,
-    shopId:true,
     itemId:true,
     pricing:true,
     availableQuantity:true,
@@ -57,6 +76,26 @@ const shopItemListSelect = {
         }
     }
 };
+
+const formatShopItemListItem = (shopItem)=>({
+    id:shopItem.id,
+    itemId:shopItem.itemId,
+    name:shopItem.item?.name,
+    pricing:shopItem.pricing,
+    availableQuantity:shopItem.availableQuantity,
+    imageUrl:shopItem.imageUrl || shopItem.item?.imageUrl || null,
+    description:shopItem.description,
+    sortOrderId:shopItem.sortOrderId,
+    active:shopItem.active,
+    categoryId:shopItem.item?.categoryId || null,
+    categoryName:shopItem.item?.category?.name || null,
+    cuisineId:shopItem.item?.category?.cuisineId || null
+});
+
+const formatSelectedFilter = (record)=>record ? {
+    id:record.id,
+    name:record.name
+} : null;
 
 const parseBooleanField = (value,fieldName)=>{
     if(value === undefined) return undefined;
@@ -183,6 +222,7 @@ const createItems = asyncHandler(async(req,res)=>{
         include:masterItemInclude
     });
 
+    await invalidateMasterItemCaches({includeShopItems:false});
     return res.status(201).json(new apiResponse(201,itemData,"master item created successfully"));
 });
 
@@ -261,6 +301,7 @@ const mapItems = asyncHandler(async(req,res)=>{
         }
     });
 
+    await invalidateMasterItemCaches();
     return res.status(200).json(new apiResponse(200,updatedCategoryData,"mapping of category and item updated successfully"));
 });
 
@@ -269,52 +310,126 @@ const fetchItemsToCategory = asyncHandler(async(req,res)=>{
 
     if(!categoryName) throw new apiError(400,"category name is required");
 
-    const categoryData = await prisma.categories.findFirst({
-        where:{
-            OR:[
-                {name:{equals:categoryName,mode:"insensitive"}},
-                {slug:categoryName.toUpperCase()}
-            ]
-        },
-        include:{
-            allItems:{
-                orderBy:{
-                    sortOrderId:"asc"
-                },
-                include:masterItemInclude
+    const cacheKey = `catalog:master:items:category:${String(categoryName).trim().toLowerCase()}`;
+    const items = await getOrSetCachedData(cacheKey,async()=>{
+        const categoryData = await prisma.categories.findFirst({
+            where:{
+                OR:[
+                    {name:{equals:categoryName,mode:"insensitive"}},
+                    {slug:categoryName.toUpperCase()}
+                ]
+            },
+            include:{
+                allItems:{
+                    orderBy:{
+                        sortOrderId:"asc"
+                    },
+                    include:masterItemInclude
+                }
             }
-        }
-    });
+        });
 
-    if(!categoryData) throw new apiError(404,"category not found");
+        if(!categoryData) throw new apiError(404,"category not found");
+        return categoryData.allItems;
+    },MASTER_ITEMS_CACHE_TTL);
 
-    return res.status(200).json(new apiResponse(200,categoryData.allItems,"items fetched successfully"));
+    return res.status(200).json(new apiResponse(200,items,"items fetched successfully"));
 });
 
 const fetchAllItems = asyncHandler(async(req,res)=>{
-    const items = await prisma.items.findMany({
-        orderBy:{
-            sortOrderId:"asc"
-        },
-        include:masterItemInclude
-    });
+    const pagination = getPagination(req.query,{defaultLimit:50,maxLimit:100});
+    const cacheKey = `catalog:master:items:all:${pagination.page}:${pagination.limit}`;
+    const responseData = await getOrSetCachedData(cacheKey,async()=>{
+        const [items,total] = await Promise.all([
+        prisma.items.findMany({
+            skip:pagination.skip,
+            take:pagination.take,
+            orderBy:{
+                sortOrderId:"asc"
+            },
+            select:{
+                id:true,
+                name:true,
+                description:true,
+                imageUrl:true,
+                sortOrderId:true,
+                categoryId:true,
+                active:true,
+                category:{
+                    select:{
+                        id:true,
+                        name:true,
+                        slug:true,
+                        cuisineId:true
+                    }
+                }
+            }
+        }),
+        prisma.items.count()
+        ]);
 
-    return res.status(200).json(new apiResponse(200,items,"master items fetched successfully"));
+        return {
+        pagination:buildPaginationMeta({
+            page:pagination.page,
+            limit:pagination.limit,
+            total
+        }),
+        items:items.map((item)=>({
+            id:item.id,
+            name:item.name,
+            description:item.description,
+            imageUrl:item.imageUrl,
+            sortOrderId:item.sortOrderId,
+            active:item.active,
+            categoryId:item.categoryId,
+            categoryName:item.category?.name || null,
+            cuisineId:item.category?.cuisineId || null
+        }))
+        };
+    },MASTER_ITEMS_CACHE_TTL);
+
+    return res.status(200).json(new apiResponse(200,responseData,"master items fetched successfully"));
 });
 
 const fetchOnlyItems = asyncHandler(async(req,res)=>{
-    const items = await prisma.items.findMany({
-        orderBy:{
-            sortOrderId:"asc"
-        }
-    });
+    const pagination = getPagination(req.query,{defaultLimit:50,maxLimit:100});
+    const cacheKey = `catalog:master:items:only:${pagination.page}:${pagination.limit}`;
+    const responseData = await getOrSetCachedData(cacheKey,async()=>{
+        const [items,total] = await Promise.all([
+        prisma.items.findMany({
+            skip:pagination.skip,
+            take:pagination.take,
+            orderBy:{
+                sortOrderId:"asc"
+            },
+            select:{
+                id:true,
+                name:true,
+                imageUrl:true,
+                sortOrderId:true,
+                active:true
+            }
+        }),
+        prisma.items.count()
+        ]);
 
-    return res.status(200).json(new apiResponse(200,items,"master items fetched successfully"));
+        return {
+        pagination:buildPaginationMeta({
+            page:pagination.page,
+            limit:pagination.limit,
+            total
+        }),
+        items
+        };
+    },MASTER_ITEMS_CACHE_TTL);
+
+    return res.status(200).json(new apiResponse(200,responseData,"master items fetched successfully"));
 });
 
 const fetchItemsByShop = asyncHandler(async(req,res)=>{
     const shopId = req.params.shopId || req.query.shopId;
     const {categoryId,categoryName,cuisineId,cuisineName} = req.query;
+    const pagination = getPagination(req.query);
 
     if(!shopId) throw new apiError(400,"shop id is required");
 
@@ -338,11 +453,31 @@ const fetchItemsByShop = asyncHandler(async(req,res)=>{
         select:{
             id:true,
             shopName:true,
-            ownerId:true
+            ownerId:true,
+            shopType:{
+                select:{
+                    id:true,
+                    name:true,
+                    slug:true,
+                    features:{
+                        where:{enabled:true},
+                        select:{feature:true}
+                    }
+                }
+            },
+            featureOverrides:{
+                select:{
+                    feature:true,
+                    enabled:true
+                }
+            }
         }
     });
 
     if(!shop) throw new apiError(404,"shop not found");
+    if(!shopHasFeature(shop,"ITEMS")){
+        throw new apiError(403,"items are not enabled for this shop type");
+    }
     if(currentUser.role !== "ADMIN" && shop.ownerId !== currentUser.id){
         throw new apiError(403,"You can only fetch items for your own shop");
     }
@@ -350,39 +485,66 @@ const fetchItemsByShop = asyncHandler(async(req,res)=>{
     const cuisine = await resolveCuisine({cuisineId,cuisineName});
     const category = await resolveCategory({categoryId,categoryName,cuisineId,cuisineName});
 
-    const items = await prisma.shopItem.findMany({
-        where:{
-            shopId,
-            active:true,
-            ...(category?.id ? {
-                item:{
-                    categoryId:category.id
-                }
-            } : {}),
-            ...(cuisine?.id && !category?.id ? {
-                item:{
-                    category:{
-                        is:{
-                            cuisineId:cuisine.id
-                        }
+    const where = {
+        shopId,
+        active:true,
+        ...(category?.id ? {
+            item:{
+                categoryId:category.id
+            }
+        } : {}),
+        ...(cuisine?.id && !category?.id ? {
+            item:{
+                category:{
+                    is:{
+                        cuisineId:cuisine.id
                     }
                 }
-            } : {})
-        },
-        orderBy:{
-            sortOrderId:"asc"
-        },
-        select:shopItemListSelect
-    });
+            }
+        } : {})
+    };
 
-    return res.status(200).json(new apiResponse(200,{
-        shop,
-        selected:{
-            cuisine,
-            category
-        },
-        items
-    },"shop items fetched successfully"));
+    const cacheKey = `catalog:shop:${shopId}:items:${category?.id || "all-categories"}:${cuisine?.id || "all-cuisines"}:${pagination.page}:${pagination.limit}`;
+    const responseData = await getOrSetCachedData(cacheKey,async()=>{
+        const [items,total] = await Promise.all([
+            prisma.shopItem.findMany({
+                where,
+                orderBy:{
+                    sortOrderId:"asc"
+                },
+                skip:pagination.skip,
+                take:pagination.take,
+                select:shopItemListSelect
+            }),
+            prisma.shopItem.count({ where })
+        ]);
+
+        return {
+            shop:{
+                id:shop.id,
+                shopName:shop.shopName,
+                ownerId:shop.ownerId,
+                shopType:shop.shopType ? {
+                    id:shop.shopType.id,
+                    name:shop.shopType.name,
+                    slug:shop.shopType.slug,
+                    features:shop.shopType.features.map((feature)=>feature.feature)
+                } : null
+            },
+            selected:{
+                cuisine:formatSelectedFilter(cuisine),
+                category:formatSelectedFilter(category)
+            },
+            pagination:buildPaginationMeta({
+                page:pagination.page,
+                limit:pagination.limit,
+                total
+            }),
+            items:items.map(formatShopItemListItem)
+        };
+    },SHOP_ITEMS_CACHE_TTL);
+
+    return res.status(200).json(new apiResponse(200,responseData,"shop items fetched successfully"));
 });
 
 // admin: reorder master catalog items
@@ -432,6 +594,7 @@ const reorderItems = asyncHandler(async(req,res)=>{
         })
     );
 
+    await invalidateMasterItemCaches({includeShopItems:false});
     return res.status(200).json(new apiResponse(200,updatedItems,"items reordered successfully"));
 });
 
@@ -524,6 +687,7 @@ const reorderShopItems = asyncHandler(async(req,res)=>{
         })
     );
 
+    await invalidateShopItemCaches(shopId);
     return res.status(200).json(new apiResponse(200,updatedShopItems,"shop items reordered successfully"));
 });
 
@@ -617,7 +781,8 @@ const editShopItem = asyncHandler(async(req,res)=>{
                     }
                 }
             },
-            include:{
+            select:{
+                id:true,
                 items:{
                     select:{
                         quantity:true,
@@ -632,25 +797,30 @@ const editShopItem = asyncHandler(async(req,res)=>{
             }
         });
 
-        for(const combo of affectedCombos){
+        const comboUpdates = affectedCombos.map((combo)=>{
             const recalculatedTotalPrice = combo.items.reduce((sum,comboItem)=>{
                 const itemPrice = Number(comboItem.item.pricing);
                 return sum + itemPrice * comboItem.quantity;
             },0);
-            const recalculatedFinalPrice = Math.max(0,Math.round(recalculatedTotalPrice - Number(combo.discount ?? 0) - (recalculatedTotalPrice * Number(combo.percentageDiscount ?? 0) / 100)));
 
-            await prisma.combo.update({
+            return prisma.combo.update({
                 where:{
                     id:combo.id
                 },
                 data:{
-                    totalPrice:recalculatedTotalPrice,
-                    finalPrice:recalculatedFinalPrice
+                    totalPrice:recalculatedTotalPrice
                 }
             });
-        }
+        });
+        if(comboUpdates.length > 0) await prisma.$transaction(comboUpdates);
     }
 
+    await Promise.all([
+        invalidateShopItemCaches(updatedShopItem.shopId),
+        pricing !== undefined
+            ? deleteCacheByPattern(`catalog:shop:${updatedShopItem.shopId}:combos:*`)
+            : Promise.resolve()
+    ]);
     return res.status(200).json(new apiResponse(200,updatedShopItem,"shop item updated successfully"));
 });
 
@@ -691,12 +861,15 @@ const deleteShopItem = asyncHandler(async(req,res)=>{
         throw new apiError(403,"You can only delete items from your own shop");
     }
 
-    const deletedShopItem = await prisma.shopItem.delete({
-        where:{
-            id:shopItemId
-        }
+    const deletedShopItem = await prisma.$transaction(async(tx)=>{
+        const deleted = await tx.shopItem.delete({
+            where:{id:shopItemId}
+        });
+        await releaseShopSlot(tx,existingShopItem.shop.id);
+        return deleted;
     });
 
+    await invalidateShopItemCaches(existingShopItem.shop.id);
     return res.status(200).json(new apiResponse(200,deletedShopItem,"shop item deleted successfully"));
 });
 
@@ -751,6 +924,7 @@ const editItem = asyncHandler(async(req,res)=>{
         include:masterItemInclude
     });
 
+    await invalidateMasterItemCaches();
     return res.status(200).json(new apiResponse(200,updatedItem,"master item updated successfully"));
 });
 
@@ -760,12 +934,21 @@ const deleteItem = asyncHandler(async(req,res)=>{
 
     if(!itemId) throw new apiError(400,"item id is required");
 
-    const deletedItem = await prisma.items.delete({
-        where:{
-            id:itemId
-        }
+    const affectedShopItems = await prisma.shopItem.groupBy({
+        by:["shopId"],
+        where:{itemId},
+        _count:{_all:true}
     });
 
+    const deletedItem = await prisma.$transaction(async(tx)=>{
+        const deleted = await tx.items.delete({where:{id:itemId}});
+        for(const affectedShop of affectedShopItems){
+            await releaseShopSlot(tx,affectedShop.shopId,affectedShop._count._all);
+        }
+        return deleted;
+    });
+
+    await invalidateMasterItemCaches();
     return res.status(200).json(new apiResponse(200,deletedItem,"master item deleted successfully"));
 });
 
@@ -817,11 +1000,34 @@ const addPersonalProduct = asyncHandler(async(req,res)=>{
         select:{
             id:true,
             ownerId:true,
-            shopName:true
+            shopName:true,
+            shopType:{
+                select:{
+                    features:{
+                        where:{enabled:true},
+                        select:{feature:true}
+                    }
+                }
+            },
+            featureOverrides:{
+                select:{
+                    feature:true,
+                    enabled:true
+                }
+            }
         }
     });
 
     if(!shop) throw new apiError(404,"shop not found");
+    if(!shopHasFeature(shop,"ITEMS")){
+        throw new apiError(403,"items are not enabled for this shop type");
+    }
+    if(!shopHasFeature(shop,"CATEGORIES") && (categoryId || categoryName)){
+        throw new apiError(403,"categories are not enabled for this shop type");
+    }
+    if(!shopHasFeature(shop,"CUISINE") && (cuisineId || cuisineName)){
+        throw new apiError(403,"cuisine is not enabled for this shop type");
+    }
     if(shop.ownerId !== sellerId) throw new apiError(403,"You can only create products for your own shop");
 
     const itemImg = req.files?.itemImg?.[0]?.path;
@@ -832,7 +1038,7 @@ const addPersonalProduct = asyncHandler(async(req,res)=>{
         uploadedImageUrl = imgUrl.url;
     }
     const requestedImageUrl = uploadedImageUrl || imageUrl || photoUrl;
-    const category = await resolveCategory({categoryId,categoryName,cuisineName,cuisineId,required:!masterItemId});
+    const category = await resolveCategory({categoryId,categoryName,cuisineName,cuisineId,required:!masterItemId && shopHasFeature(shop,"CATEGORIES")});
 
     let masterItem = null;
     if(masterItemId){
@@ -851,7 +1057,7 @@ const addPersonalProduct = asyncHandler(async(req,res)=>{
                     equals:customItemName,
                     mode:"insensitive"
                 },
-                categoryId:category.id
+                categoryId:category?.id || null
             },
             include:masterItemInclude
         });
@@ -863,7 +1069,7 @@ const addPersonalProduct = asyncHandler(async(req,res)=>{
                     description,
                     imageUrl:requestedImageUrl,
                     sortOrderId:Number(sortOrderId ?? sortOrder ?? 0),
-                    categoryId:category.id
+                    categoryId:category?.id
                 },
                 include:masterItemInclude
             });
@@ -881,20 +1087,27 @@ const addPersonalProduct = asyncHandler(async(req,res)=>{
 
     if(existingShopItem) throw new apiError(409,`${masterItem.name} is already added to this shop`);
 
-    const shopItem = await prisma.shopItem.create({
-        data:{
-            shopId,
-            itemId:masterItem.id,
-            pricing:String(shopItemPrice),
-            availableQuantity:shopItemAvailableQuantity,
-            description,
-            imageUrl:requestedImageUrl,
-            sortOrderId:Number(sortOrderId ?? sortOrder ?? 0),
-            active:parseBooleanField(active,"active") ?? true
-        },
-        include:shopItemInclude
+    const shopItem = await prisma.$transaction(async(tx)=>{
+        await reserveShopSlot(tx,shopId);
+        return tx.shopItem.create({
+            data:{
+                shopId,
+                itemId:masterItem.id,
+                pricing:String(shopItemPrice),
+                availableQuantity:shopItemAvailableQuantity,
+                description,
+                imageUrl:requestedImageUrl,
+                sortOrderId:Number(sortOrderId ?? sortOrder ?? 0),
+                active:parseBooleanField(active,"active") ?? true
+            },
+            include:shopItemInclude
+        });
     });
 
+    await Promise.all([
+        invalidateMasterItemCaches({includeShopItems:false}),
+        invalidateShopItemCaches(shopId)
+    ]);
     return res.status(201).json(new apiResponse(201,shopItem,"item added to shop successfully"));
 });
 

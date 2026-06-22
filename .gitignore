@@ -4,3 +4,7 @@ node_modules
 postman
 /src/generated/prisma
 FRONTEND_API_GUIDE.
+.codex
+.agents
+server.err.log
+server.out.log
