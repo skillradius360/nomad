@@ -71,6 +71,7 @@ model Shop {
 
   MinimumDeliveryRate Int? @default(50)
   FreeDeliveryRate    Int? @default(70)
+  deliveryEnabled     Boolean @default(true)
 
   owner            User                    @relation(fields: [ownerId], references: [id], onDelete: Cascade)
   shopType         ShopType?               @relation(fields: [shopTypeId], references: [id], onDelete: SetNull)
@@ -224,8 +225,11 @@ model OrderItem {
   comboId          String?
   name             String
   quantity         Int           @default(1)
+  quantityValue    Float?
   priceAtOrderTime Int           @default(0)
   totalPrice       Int           @default(0)
+  variantSnapshot  Json?
+  measurementSnapshot Json?
 
   order    Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
   shopItem ShopItem? @relation(fields: [shopItemId], references: [id], onDelete: SetNull)
@@ -521,6 +525,13 @@ model ShopItem {
 
   pricing           String
   availableQuantity Int?   @default(0)
+  pricingMode       ShopItemPricingMode @default(FIXED)
+  unit              ShopItemUnit?
+  displayUnit       String?
+  pricePerUnit      Float?
+  minOrderQuantity  Float?
+  quantityStep      Float?
+  availableQuantityValue Float?
 
   imageUrl    String?
   description String?
@@ -534,11 +545,50 @@ model ShopItem {
   menuItems  MenuItem[]
   orderItems OrderItem[]
   offerItems OfferItem[]
+  variantGroups ShopItemVariantGroup[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
 
   @@unique([shopId, itemId])
+}
+
+model ShopItemVariantGroup {
+  id         String @id @default(uuid())
+  shopItemId String
+
+  name      String
+  required  Boolean @default(false)
+  minSelect Int     @default(0)
+  maxSelect Int     @default(1)
+  sortOrder Int     @default(0)
+  active    Boolean @default(true)
+
+  shopItem ShopItem @relation(fields: [shopItemId], references: [id], onDelete: Cascade)
+  options  ShopItemVariantOption[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@index([shopItemId])
+}
+
+model ShopItemVariantOption {
+  id      String @id @default(uuid())
+  groupId String
+
+  label     String
+  subLabel  String?
+  amount    Int     @default(0)
+  sortOrder Int     @default(0)
+  active    Boolean @default(true)
+
+  group ShopItemVariantGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@index([groupId])
 }
 
 model Combo {
@@ -923,6 +973,24 @@ enum PaymentMethod {
 enum OrderItemType {
   ITEM
   COMBO
+}
+
+enum ShopItemPricingMode {
+  FIXED
+  MEASURED
+}
+
+enum ShopItemUnit {
+  KG
+  GRAM
+  LITRE
+  ML
+  PIECE
+  DOZEN
+  PACK
+  BUNCH
+  BOX
+  CUSTOM
 }
 
 enum DayOfWeek {

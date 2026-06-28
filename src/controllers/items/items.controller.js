@@ -5,6 +5,11 @@ import { deleteCacheByPattern, getOrSetCachedData } from "../../utils/cache.js";
 import { buildPaginationMeta, getPagination } from "../../utils/pagination.js";
 import { shopHasFeature } from "../../utils/shopFeatures.js";
 import { releaseShopSlot, reserveShopSlot } from "../../utils/billing.js";
+import {
+    formatShopItemPricing,
+    getShopItemPricingMode,
+    normalizeShopItemPricingInput
+} from "../../utils/shopItemVariants.js";
 
 const MASTER_ITEMS_CACHE_TTL = 120;
 const SHOP_ITEMS_CACHE_TTL = 45;
@@ -19,7 +24,14 @@ const invalidateMasterItemCaches = async({includeShopItems = true} = {})=>{
 
 const invalidateShopItemCaches = async(shopId)=>{
     if(!shopId) return;
-    await deleteCacheByPattern(`catalog:shop:${shopId}:items:*`);
+    await Promise.all([
+        deleteCacheByPattern(`catalog:shop:${shopId}:items:*`),
+        deleteCacheByPattern(`catalog:shop:${shopId}:combos:*`),
+        deleteCacheByPattern(`catalog:shop:${shopId}:running-menus:*`),
+        deleteCacheByPattern(`buyer:shop:full:*:${shopId}`),
+        deleteCacheByPattern(`buyer:shop:${shopId}:*`),
+        deleteCacheByPattern("buyer:shop:slug:*")
+    ]);
 };
 
 const masterItemInclude = {
@@ -44,9 +56,56 @@ const masterItemInclude = {
     }
 };
 
+const masterItemListSelect = {
+    id:true,
+    name:true,
+    description:true,
+    imageUrl:true,
+    sortOrderId:true,
+    categoryId:true,
+    active:true,
+    category:{
+        select:{
+            id:true,
+            name:true,
+            slug:true,
+            cuisineId:true
+        }
+    }
+};
+
 const shopItemInclude = {
     item:{
         include:masterItemInclude
+    },
+    variantGroups:{
+        orderBy:{sortOrder:"asc"},
+        include:{
+            options:{
+                orderBy:{sortOrder:"asc"}
+            }
+        }
+    }
+};
+
+const shopItemVariantSelect = {
+    id:true,
+    name:true,
+    required:true,
+    minSelect:true,
+    maxSelect:true,
+    sortOrder:true,
+    active:true,
+    options:{
+        orderBy:{sortOrder:"asc"},
+        select:{
+            id:true,
+            label:true,
+            subLabel:true,
+            amount:true,
+            sortOrder:true,
+            active:true
+        }
     }
 };
 
@@ -55,6 +114,13 @@ const shopItemListSelect = {
     itemId:true,
     pricing:true,
     availableQuantity:true,
+    pricingMode:true,
+    unit:true,
+    displayUnit:true,
+    pricePerUnit:true,
+    minOrderQuantity:true,
+    quantityStep:true,
+    availableQuantityValue:true,
     imageUrl:true,
     description:true,
     sortOrderId:true,
@@ -74,7 +140,57 @@ const shopItemListSelect = {
                 }
             }
         }
+    },
+    variantGroups:{
+        orderBy:{sortOrder:"asc"},
+        select:shopItemVariantSelect
     }
+};
+
+const formatShopItemVariantGroups = (variantGroups = [])=>variantGroups.map((group)=>({
+    id:group.id,
+    name:group.name,
+    required:group.required,
+    minSelect:group.minSelect,
+    maxSelect:group.maxSelect,
+    sortOrder:group.sortOrder,
+    active:group.active,
+    options:group.options?.map((option)=>({
+        id:option.id,
+        label:option.label,
+        subLabel:option.subLabel,
+        amount:option.amount,
+        sortOrder:option.sortOrder,
+        active:option.active
+    })) || []
+}));
+
+const calculateShopItemLowestPrice = (shopItem)=>{
+    if(getShopItemPricingMode(shopItem) === "MEASURED"){
+        const pricePerUnit = Number(shopItem.pricePerUnit);
+        const minQuantity = Number(shopItem.minOrderQuantity || shopItem.quantityStep || 1);
+        if(!Number.isFinite(pricePerUnit) || pricePerUnit < 0 || !Number.isFinite(minQuantity) || minQuantity <= 0) return 0;
+        return Math.max(0,Math.round(pricePerUnit * minQuantity));
+    }
+
+    const basePrice = Number(shopItem.pricing);
+    if(!Number.isFinite(basePrice) || basePrice < 0) return 0;
+
+    const variantAmount = (shopItem.variantGroups || []).reduce((total,group)=>{
+        if(!group.active) return total;
+
+        const activeOptions = (group.options || [])
+            .filter((option)=>option.active)
+            .map((option)=>Number(option.amount))
+            .filter((amount)=>Number.isFinite(amount) && amount >= 0)
+            .sort((first,second)=>first - second);
+        const minSelect = Math.max(Number(group.minSelect || 0),group.required ? 1 : 0);
+
+        if(minSelect <= 0 || activeOptions.length === 0) return total;
+        return total + activeOptions.slice(0,minSelect).reduce((sum,amount)=>sum + amount,0);
+    },0);
+
+    return Math.max(0,Math.round(basePrice + variantAmount));
 };
 
 const formatShopItemListItem = (shopItem)=>({
@@ -82,6 +198,10 @@ const formatShopItemListItem = (shopItem)=>({
     itemId:shopItem.itemId,
     name:shopItem.item?.name,
     pricing:shopItem.pricing,
+    ...formatShopItemPricing(shopItem),
+    lowestPrice:calculateShopItemLowestPrice(shopItem),
+    hasVariants:shopItem.variantGroups?.some((group)=>group.active && group.options?.some((option)=>option.active)) || false,
+    variantGroups:formatShopItemVariantGroups(shopItem.variantGroups),
     availableQuantity:shopItem.availableQuantity,
     imageUrl:shopItem.imageUrl || shopItem.item?.imageUrl || null,
     description:shopItem.description,
@@ -106,6 +226,158 @@ const parseBooleanField = (value,fieldName)=>{
         if(normalizedValue === "false") return false;
     }
     throw new apiError(400,`${fieldName} must be a boolean`);
+};
+
+const parseTagIdsField = (value,fieldName = "tagIds")=>{
+    if(value === undefined || value === null || value === "") return [];
+    if(Array.isArray(value)) return value.map((tagId)=>String(tagId).trim()).filter(Boolean);
+
+    const stringValue = String(value).trim();
+    if(!stringValue) return [];
+
+    if(stringValue.startsWith("[")){
+        try{
+            const parsed = JSON.parse(stringValue);
+            if(Array.isArray(parsed)){
+                return parsed.map((tagId)=>String(tagId).trim()).filter(Boolean);
+            }
+        }catch(error){
+        }
+        throw new apiError(400,`${fieldName} must be a tag id or a valid JSON array of tag ids`);
+    }
+
+    return [stringValue];
+};
+
+const parseShopItemVariantGroups = (rawValue)=>{
+    if(rawValue === undefined) return undefined;
+    if(rawValue === null || rawValue === "") return [];
+
+    let variantGroups = rawValue;
+    if(typeof rawValue === "string"){
+        try{
+            variantGroups = JSON.parse(rawValue);
+        }catch{
+            throw new apiError(400,"variantGroups must be a valid JSON array");
+        }
+    }
+
+    if(!Array.isArray(variantGroups)){
+        throw new apiError(400,"variantGroups must be an array");
+    }
+
+    return variantGroups.map((group,index)=>{
+        if(!group || typeof group !== "object"){
+            throw new apiError(400,"each variant group must be an object");
+        }
+
+        const name = String(group.name || group.label || "").trim();
+        if(!name) throw new apiError(400,"variant group name is required");
+
+        if(!Array.isArray(group.options) || group.options.length === 0){
+            throw new apiError(400,`${name} needs at least one variant option`);
+        }
+
+        const required = parseBooleanField(group.required ?? false,"variant group required");
+        let minSelect = Number(group.minSelect ?? (required ? 1 : 0));
+        let maxSelect = Number(group.maxSelect ?? 1);
+
+        if(!Number.isInteger(minSelect) || minSelect < 0){
+            throw new apiError(400,`${name} minSelect must be a non-negative integer`);
+        }
+        if(!Number.isInteger(maxSelect) || maxSelect < 1){
+            throw new apiError(400,`${name} maxSelect must be a positive integer`);
+        }
+        if(required && minSelect < 1) minSelect = 1;
+        if(minSelect > maxSelect){
+            throw new apiError(400,`${name} minSelect cannot be greater than maxSelect`);
+        }
+        if(maxSelect > group.options.length){
+            throw new apiError(400,`${name} maxSelect cannot be greater than option count`);
+        }
+
+        const normalizedOptions = group.options.map((option,optionIndex)=>{
+            if(!option || typeof option !== "object"){
+                throw new apiError(400,`${name} option must be an object`);
+            }
+
+            const label = String(option.label || option.name || "").trim();
+            if(!label) throw new apiError(400,`${name} option label is required`);
+
+            const amount = Number(option.amount ?? option.priceDiff ?? option.priceDifference ?? 0);
+            if(!Number.isInteger(amount) || amount < 0){
+                throw new apiError(400,`${name} option amount must be a non-negative integer`);
+            }
+
+            return {
+                label,
+                subLabel:option.subLabel === undefined || option.subLabel === null ? null : String(option.subLabel).trim(),
+                amount,
+                sortOrder:Number(option.sortOrder ?? optionIndex + 1),
+                active:parseBooleanField(option.active ?? true,`${name} option active`)
+            };
+        });
+
+        return {
+            name,
+            required,
+            minSelect,
+            maxSelect,
+            sortOrder:Number(group.sortOrder ?? index + 1),
+            active:parseBooleanField(group.active ?? true,"variant group active"),
+            options:normalizedOptions
+        };
+    });
+};
+
+const replaceShopItemVariantGroups = async(tx,shopItemId,variantGroups)=>{
+    if(variantGroups === undefined) return;
+
+    await tx.shopItemVariantGroup.deleteMany({where:{shopItemId}});
+    if(variantGroups.length === 0) return;
+
+    for(const group of variantGroups){
+        await tx.shopItemVariantGroup.create({
+            data:{
+                shopItemId,
+                name:group.name,
+                required:group.required,
+                minSelect:group.minSelect,
+                maxSelect:group.maxSelect,
+                sortOrder:group.sortOrder,
+                active:group.active,
+                options:{
+                    create:group.options.map((option)=>({
+                        label:option.label,
+                        subLabel:option.subLabel,
+                        amount:option.amount,
+                        sortOrder:option.sortOrder,
+                        active:option.active
+                    }))
+                }
+            }
+        });
+    }
+};
+
+const normalizeActiveTagIds = async(tagIds)=>{
+    const uniqueTagIds = [...new Set(tagIds)];
+    if(!uniqueTagIds.length) return [];
+
+    const tagCount = await prisma.tag.count({
+        where:{
+            id:{
+                in:uniqueTagIds
+            },
+            active:true
+        }
+    });
+
+    if(tagCount !== uniqueTagIds.length){
+        throw new apiError(400,"one or more tag ids are invalid or inactive");
+    }
+
+    return uniqueTagIds;
 };
 
 const resolveCuisine = async({cuisineId,cuisineName})=>{
@@ -184,9 +456,12 @@ const createItems = asyncHandler(async(req,res)=>{
         categoryId,
         categoryName,
         cuisineName,
-        cuisineId
+        cuisineId,
+        tagIds,
+        tags,
+        addTag
     } = req.body;
-    const itemTitle = itemName || name;
+    const itemTitle = String(itemName || name || "").trim();
 
     if(!itemTitle) throw new apiError(400,"item name is required");
 
@@ -198,6 +473,7 @@ const createItems = asyncHandler(async(req,res)=>{
     if(!imgUrl?.url) throw new apiError(400,"image upload failure")
 
     const category = await resolveCategory({categoryId,categoryName,cuisineName,cuisineId});
+    const normalizedTagIds = await normalizeActiveTagIds(parseTagIdsField(tagIds ?? tags ?? addTag,"tagIds"));
 
     const existingItem = await prisma.items.findFirst({
         where:{
@@ -217,7 +493,16 @@ const createItems = asyncHandler(async(req,res)=>{
             description,
             imageUrl:imgUrl.url,
             sortOrderId:Number(sortOrderId ?? sortOrder ?? 0),
-            categoryId:category?.id
+            categoryId:category?.id,
+            tags:normalizedTagIds.length ? {
+                create:normalizedTagIds.map((tagId)=>({
+                    tag:{
+                        connect:{
+                            id:tagId
+                        }
+                    }
+                }))
+            } : undefined
         },
         include:masterItemInclude
     });
@@ -234,10 +519,11 @@ const mapItems = asyncHandler(async(req,res)=>{
     if(!Array.isArray(menuItems) || menuItems.length === 0) throw new apiError(400,"Not a array passed with menu items");
 
     const requestedItems = menuItems.map((item)=>{
-        if(typeof item === "string") return {name:item};
+        if(typeof item === "string") return {name:item.trim()};
+        const requestedName = item.name || item.itemName;
         return {
             id:item.id || item.itemId,
-            name:item.name || item.itemName,
+            name:requestedName ? String(requestedName).trim() : undefined,
             sortOrderId:item.sortOrderId
         };
     });
@@ -253,14 +539,24 @@ const mapItems = asyncHandler(async(req,res)=>{
 
     if(itemWhere.length !== requestedItems.length) throw new apiError(400,"item id or name is required");
 
-    const categoryData = await resolveCategory({categoryName,cuisineName,required:true});
-
-    const itemsData = await prisma.items.findMany({
-        where:{
-            OR:itemWhere
-        },
-        include:masterItemInclude
-    });
+    const [categoryData,itemsData] = await Promise.all([
+        resolveCategory({categoryName,cuisineName,required:true}),
+        prisma.items.findMany({
+            where:{
+                OR:itemWhere
+            },
+            select:{
+                id:true,
+                name:true,
+                categoryId:true,
+                category:{
+                    select:{
+                        name:true
+                    }
+                }
+            }
+        })
+    ]);
 
     const missingItems = requestedItems.filter((requestedItem)=>{
         return !itemsData.some((item)=>{
@@ -280,26 +576,32 @@ const mapItems = asyncHandler(async(req,res)=>{
         throw new apiError(409,assignedNames.join(", "));
     }
 
-    const updatedCategoryData = await prisma.categories.update({
+    const itemIds = itemsData.map((item)=>item.id);
+    await prisma.items.updateMany({
         where:{
-            id:categoryData.id
+            id:{
+                in:itemIds
+            }
         },
         data:{
-            allItems:{
-                connect:itemsData.map((item)=>({
-                    id:item.id
-                }))
-            }
-        },
-        include:{
-            allItems:{
-                orderBy:{
-                    sortOrderId:"asc"
-                },
-                include:masterItemInclude
-            }
+            categoryId:categoryData.id
         }
     });
+
+    const allItems = await prisma.items.findMany({
+        where:{
+            categoryId:categoryData.id
+        },
+        orderBy:{
+            sortOrderId:"asc"
+        },
+        select:masterItemListSelect
+    });
+
+    const updatedCategoryData = {
+        ...categoryData,
+        allItems
+    };
 
     await invalidateMasterItemCaches();
     return res.status(200).json(new apiResponse(200,updatedCategoryData,"mapping of category and item updated successfully"));
@@ -310,7 +612,7 @@ const fetchItemsToCategory = asyncHandler(async(req,res)=>{
 
     if(!categoryName) throw new apiError(400,"category name is required");
 
-    const cacheKey = `catalog:master:items:category:${String(categoryName).trim().toLowerCase()}`;
+    const cacheKey = `catalog:master:items:category:v2:${String(categoryName).trim().toLowerCase()}`;
     const items = await getOrSetCachedData(cacheKey,async()=>{
         const categoryData = await prisma.categories.findFirst({
             where:{
@@ -324,7 +626,7 @@ const fetchItemsToCategory = asyncHandler(async(req,res)=>{
                     orderBy:{
                         sortOrderId:"asc"
                     },
-                    include:masterItemInclude
+                    select:masterItemListSelect
                 }
             }
         });
@@ -695,13 +997,21 @@ const editShopItem = asyncHandler(async(req,res)=>{
     const {shopItemId} = req.params;
     const {
         pricing,
+        pricingMode,
+        unit,
+        displayUnit,
+        pricePerUnit,
+        minOrderQuantity,
+        quantityStep,
+        availableQuantityValue,
         availableQuantity,
         description,
         imageUrl,
         photoUrl,
         sortOrderId,
         sortOrder,
-        active
+        active,
+        variantGroups
     } = req.body;
 
     if(!shopItemId) throw new apiError(400,"shop item id is required");
@@ -738,12 +1048,28 @@ const editShopItem = asyncHandler(async(req,res)=>{
         throw new apiError(403,"You can only edit items for your own shop");
     }
 
-    if(pricing !== undefined && pricing !== null && pricing !== ""){
+    const pricingInput = {
+        pricingMode,
+        unit,
+        displayUnit,
+        pricePerUnit,
+        minOrderQuantity,
+        quantityStep,
+        availableQuantityValue,
+        pricing,
+        availableQuantity
+    };
+    const pricingDataToUpdate = normalizeShopItemPricingInput(pricingInput,{creating:false});
+    const switchingToMeasured = pricingDataToUpdate.pricingMode === "MEASURED";
+
+    if(pricing !== undefined && pricing !== null && pricing !== "" && !switchingToMeasured){
         const updatedPrice = Number(pricing);
         if(!Number.isFinite(updatedPrice) || updatedPrice < 0){
             throw new apiError(400,"pricing must be a valid non-negative number");
         }
     }
+    const parsedVariantGroups = parseShopItemVariantGroups(variantGroups);
+    const variantGroupsToReplace = switchingToMeasured && parsedVariantGroups === undefined ? [] : parsedVariantGroups;
 
     const itemImg = req.files?.itemImg?.[0]?.path;
     let uploadedImageUrl = null;
@@ -754,24 +1080,54 @@ const editShopItem = asyncHandler(async(req,res)=>{
     }
     const dataToUpdate = {};
 
-    if(pricing !== undefined) dataToUpdate.pricing = String(pricing);
-    if(availableQuantity !== undefined) dataToUpdate.availableQuantity = availableQuantity === null ? null : Number(availableQuantity);
+    Object.assign(dataToUpdate,pricingDataToUpdate);
+    if(pricing !== undefined && !switchingToMeasured) dataToUpdate.pricing = String(pricing);
+    if(availableQuantity !== undefined && dataToUpdate.pricingMode !== "MEASURED"){
+        dataToUpdate.availableQuantity = availableQuantity === null ? null : Number(availableQuantity);
+    }
     if(description !== undefined) dataToUpdate.description = description;
     if(uploadedImageUrl || imageUrl !== undefined || photoUrl !== undefined) dataToUpdate.imageUrl = uploadedImageUrl || imageUrl || photoUrl;
     if(sortOrderId !== undefined || sortOrder !== undefined) dataToUpdate.sortOrderId = sortOrderId === null || sortOrder === null ? null : Number(sortOrderId ?? sortOrder);
     if(active !== undefined) dataToUpdate.active = parseBooleanField(active,"active");
 
-    if(Object.keys(dataToUpdate).length === 0) throw new apiError(400,"no shop item data passed");
+    if(dataToUpdate.pricingMode === "MEASURED" && parsedVariantGroups && parsedVariantGroups.length > 0){
+        throw new apiError(400,"measured items cannot have variantGroups");
+    }
 
-    const updatedShopItem = await prisma.shopItem.update({
-        where:{
-            id:shopItemId
-        },
-        data:dataToUpdate,
-        include:shopItemInclude
+    if(dataToUpdate.pricingMode === "MEASURED"){
+        const comboCount = await prisma.comboItem.count({
+            where:{
+                itemId:shopItemId
+            }
+        });
+        if(comboCount > 0){
+            throw new apiError(400,"measured items cannot be used in combos");
+        }
+    }
+
+    if(Object.keys(dataToUpdate).length === 0 && variantGroupsToReplace === undefined){
+        throw new apiError(400,"no shop item data passed");
+    }
+
+    const updatedShopItem = await prisma.$transaction(async(tx)=>{
+        if(Object.keys(dataToUpdate).length > 0){
+            await tx.shopItem.update({
+                where:{
+                    id:shopItemId
+                },
+                data:dataToUpdate
+            });
+        }
+        await replaceShopItemVariantGroups(tx,shopItemId,variantGroupsToReplace);
+        return tx.shopItem.findUnique({
+            where:{
+                id:shopItemId
+            },
+            include:shopItemInclude
+        });
     });
 
-    if(pricing !== undefined){
+    if(pricing !== undefined || variantGroupsToReplace !== undefined || Object.keys(pricingDataToUpdate).length > 0){
         const affectedCombos = await prisma.combo.findMany({
             where:{
                 shopId:updatedShopItem.shopId,
@@ -789,7 +1145,16 @@ const editShopItem = asyncHandler(async(req,res)=>{
                         item:{
                             select:{
                                 id:true,
-                                pricing:true
+                                pricing:true,
+                                pricingMode:true,
+                                pricePerUnit:true,
+                                minOrderQuantity:true,
+                                quantityStep:true,
+                                variantGroups:{
+                                    where:{active:true},
+                                    orderBy:{sortOrder:"asc"},
+                                    select:shopItemVariantSelect
+                                }
                             }
                         }
                     }
@@ -799,7 +1164,7 @@ const editShopItem = asyncHandler(async(req,res)=>{
 
         const comboUpdates = affectedCombos.map((combo)=>{
             const recalculatedTotalPrice = combo.items.reduce((sum,comboItem)=>{
-                const itemPrice = Number(comboItem.item.pricing);
+                const itemPrice = calculateShopItemLowestPrice(comboItem.item);
                 return sum + itemPrice * comboItem.quantity;
             },0);
 
@@ -817,7 +1182,7 @@ const editShopItem = asyncHandler(async(req,res)=>{
 
     await Promise.all([
         invalidateShopItemCaches(updatedShopItem.shopId),
-        pricing !== undefined
+        pricing !== undefined || variantGroupsToReplace !== undefined || Object.keys(pricingDataToUpdate).length > 0
             ? deleteCacheByPattern(`catalog:shop:${updatedShopItem.shopId}:combos:*`)
             : Promise.resolve()
     ]);
@@ -966,13 +1331,21 @@ const addPersonalProduct = asyncHandler(async(req,res)=>{
         itemName,
         name,
         pricing,
+        pricingMode,
+        unit,
+        displayUnit,
+        pricePerUnit,
+        minOrderQuantity,
+        quantityStep,
+        availableQuantityValue,
         availableQuantity,
         description,
         imageUrl,
         photoUrl,
         sortOrderId,
         sortOrder,
-        active
+        active,
+        variantGroups
     } = req.body;
     const customItemName = itemName || name;
     const masterItemId = globalItemId || itemId;
@@ -980,17 +1353,39 @@ const addPersonalProduct = asyncHandler(async(req,res)=>{
     if(!sellerId) throw new apiError(401,"Unauthorized user");
     if(!shopId) throw new apiError(400,"shop id is required");
     if(!masterItemId && !customItemName) throw new apiError(400,"item id or item name is required");
-    if(pricing === undefined || pricing === null || pricing === "") throw new apiError(400,"pricing is required");
+    const pricingData = normalizeShopItemPricingInput({
+        pricingMode,
+        unit,
+        displayUnit,
+        pricePerUnit,
+        minOrderQuantity,
+        quantityStep,
+        availableQuantityValue,
+        pricing,
+        availableQuantity
+    },{creating:true});
 
-    const shopItemPrice = Number(pricing);
-    const shopItemAvailableQuantity = Number(availableQuantity ?? 0);
+    if(pricingData.pricingMode === "FIXED"){
+        if(pricing === undefined || pricing === null || pricing === "") throw new apiError(400,"pricing is required");
 
-    if(!Number.isFinite(shopItemPrice) || shopItemPrice < 0){
-        throw new apiError(400,"pricing must be a valid non-negative number");
+        const shopItemPrice = Number(pricing);
+        const shopItemAvailableQuantity = Number(availableQuantity ?? 0);
+
+        if(!Number.isFinite(shopItemPrice) || shopItemPrice < 0){
+            throw new apiError(400,"pricing must be a valid non-negative number");
+        }
+
+        if(!Number.isFinite(shopItemAvailableQuantity) || shopItemAvailableQuantity < 0){
+            throw new apiError(400,"availableQuantity must be a valid non-negative number");
+        }
+
+        pricingData.pricing = String(shopItemPrice);
+        pricingData.availableQuantity = shopItemAvailableQuantity;
     }
+    const parsedVariantGroups = parseShopItemVariantGroups(variantGroups);
 
-    if(!Number.isFinite(shopItemAvailableQuantity) || shopItemAvailableQuantity < 0){
-        throw new apiError(400,"availableQuantity must be a valid non-negative number");
+    if(pricingData.pricingMode === "MEASURED" && parsedVariantGroups && parsedVariantGroups.length > 0){
+        throw new apiError(400,"measured items cannot have variantGroups");
     }
 
     const shop = await prisma.shop.findUnique({
@@ -1069,7 +1464,76 @@ const addPersonalProduct = asyncHandler(async(req,res)=>{
                     description,
                     imageUrl:requestedImageUrl,
                     sortOrderId:Number(sortOrderId ?? sortOrder ?? 0),
-                    categoryId:category?.id
+                    categoryId:category?.id,
+                    tags:normalizedTagIds.length ? {
+                        create:normalizedTagIds.map((tagId)=>({
+                            tag:{
+                                connect:{
+                                    id:tagId
+                                }
+                            }
+                        }))
+                    } : undefined
+                },
+                include:masterItemInclude
+            });
+        }else if(normalizedTagIds.length){
+            const existingTagLinks = await prisma.itemTag.findMany({
+                where:{
+                    itemId:masterItem.id,
+                    tagId:{
+                        in:normalizedTagIds
+                    }
+                },
+                select:{
+                    tagId:true
+                }
+            });
+            const existingTagIds = new Set(existingTagLinks.map((tag)=>tag.tagId));
+            const tagIdsToCreate = normalizedTagIds.filter((tagId)=>!existingTagIds.has(tagId));
+            if(tagIdsToCreate.length){
+                await prisma.itemTag.createMany({
+                    data:tagIdsToCreate.map((tagId)=>({
+                        itemId:masterItem.id,
+                        tagId
+                    })),
+                    skipDuplicates:true
+                });
+                masterItem = await prisma.items.findUnique({
+                    where:{
+                        id:masterItem.id
+                    },
+                    include:masterItemInclude
+                });
+            }
+        }
+    }
+
+    if(masterItemId && normalizedTagIds.length){
+        const existingTagLinks = await prisma.itemTag.findMany({
+            where:{
+                itemId:masterItem.id,
+                tagId:{
+                    in:normalizedTagIds
+                }
+            },
+            select:{
+                tagId:true
+            }
+        });
+        const existingTagIds = new Set(existingTagLinks.map((tag)=>tag.tagId));
+        const tagIdsToCreate = normalizedTagIds.filter((tagId)=>!existingTagIds.has(tagId));
+        if(tagIdsToCreate.length){
+            await prisma.itemTag.createMany({
+                data:tagIdsToCreate.map((tagId)=>({
+                    itemId:masterItem.id,
+                    tagId
+                })),
+                skipDuplicates:true
+            });
+            masterItem = await prisma.items.findUnique({
+                where:{
+                    id:masterItem.id
                 },
                 include:masterItemInclude
             });
@@ -1089,17 +1553,20 @@ const addPersonalProduct = asyncHandler(async(req,res)=>{
 
     const shopItem = await prisma.$transaction(async(tx)=>{
         await reserveShopSlot(tx,shopId);
-        return tx.shopItem.create({
+        const createdShopItem = await tx.shopItem.create({
             data:{
                 shopId,
                 itemId:masterItem.id,
-                pricing:String(shopItemPrice),
-                availableQuantity:shopItemAvailableQuantity,
+                ...pricingData,
                 description,
                 imageUrl:requestedImageUrl,
                 sortOrderId:Number(sortOrderId ?? sortOrder ?? 0),
                 active:parseBooleanField(active,"active") ?? true
-            },
+            }
+        });
+        await replaceShopItemVariantGroups(tx,createdShopItem.id,parsedVariantGroups);
+        return tx.shopItem.findUnique({
+            where:{id:createdShopItem.id},
             include:shopItemInclude
         });
     });

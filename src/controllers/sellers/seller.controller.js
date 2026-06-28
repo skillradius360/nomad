@@ -13,14 +13,31 @@ const parseCoordinate = (value, fieldName) => {
 
 const sellerEditableFields = ["name", "address", "latitude", "longitude"];
 
+const sellerProfileSelect = {
+    id: true,
+    email: true,
+    name: true,
+    phone: true,
+    role: true,
+    latitude: true,
+    longitude: true,
+    address: true,
+    profileImg: true,
+    billingPlan: true,
+    isVerified: true,
+    isBlocked: true,
+    createdAt: true,
+    updatedAt: true,
+};
+
 const buildSellerProfileData = ({ name, address, latitude, longitude }) => {
     if (!name || !address || latitude === undefined || longitude === undefined) {
         throw new apiError(400, "Seller name, address, latitude and longitude are required");
     }
 
     return {
-        name,
-        address,
+        name: String(name).trim(),
+        address: String(address).trim(),
         latitude: parseCoordinate(latitude, "latitude"),
         longitude: parseCoordinate(longitude, "longitude"),
         role: "SELLER",
@@ -181,9 +198,10 @@ const getSellerProfile = asyncHandler(async (req, res) => {
 });
 
 const updateSellerProfile = asyncHandler(async (req, res) => {
-    const userId = req.userData?.id;
+    const userId = req.params.userId || req.userData?.id;
+    const requesterId = req.userData?.id;
 
-    if (!userId) {
+    if (!userId || !requesterId) {
         throw new apiError(401, "Unauthorized user");
     }
 
@@ -191,7 +209,9 @@ const updateSellerProfile = asyncHandler(async (req, res) => {
 
     sellerEditableFields.forEach((field) => {
         if (req.body[field] !== undefined) {
-            updateData[field] = req.body[field];
+            updateData[field] = field === "latitude" || field === "longitude"
+                ? req.body[field]
+                : String(req.body[field]).trim();
         }
     });
 
@@ -209,7 +229,7 @@ const updateSellerProfile = asyncHandler(async (req, res) => {
 
     const currentUser = await prisma.user.findUnique({
         where: {
-            id: userId,
+            id: requesterId,
         },
         select: {
             id: true,
@@ -222,8 +242,31 @@ const updateSellerProfile = asyncHandler(async (req, res) => {
         throw new apiError(401, "User blocked or unauthorized");
     }
 
-    if (currentUser.role !== "SELLER") {
-        throw new apiError(403, "Seller access required");
+    if (currentUser.role !== "ADMIN" && currentUser.role !== "SELLER") {
+        throw new apiError(403, "Admin or seller access required");
+    }
+
+    if (currentUser.role === "SELLER" && userId !== requesterId) {
+        throw new apiError(403, "You can only edit your own seller profile");
+    }
+
+    const existingSeller = await prisma.user.findUnique({
+        where:{
+            id:userId
+        },
+        select:{
+            id:true,
+            role:true,
+            isBlocked:true
+        }
+    });
+
+    if (!existingSeller || existingSeller.isBlocked) {
+        throw new apiError(404, "seller not found or blocked");
+    }
+
+    if (existingSeller.role !== "SELLER") {
+        throw new apiError(403, "Target user is not a seller");
     }
 
     const seller = await prisma.user.update({
@@ -231,6 +274,7 @@ const updateSellerProfile = asyncHandler(async (req, res) => {
             id: userId,
         },
         data: updateData,
+        select:sellerProfileSelect,
     });
 
     return res

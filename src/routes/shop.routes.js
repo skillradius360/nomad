@@ -8,9 +8,12 @@ import {
     deleteSeller,
     makeSellerGoLive,
     findFullShopData,
+    fetchShopCustomers,
+    fetchAllShops,
     setShopTrialPeriod,
     setShopTimings,
     setShopStatus,
+    toggleShopAvailability,
     editShopSettings,
     findNearbyShops,
     findByShopSlug,
@@ -26,11 +29,15 @@ export const shopRouter = Router();
 
 shopRouter.use(verifyJWT);
 
+shopRouter.route("/").get(buyerReadRateLimit, fetchAllShops);
+shopRouter.route("/admin/all").get(isAdmin, expensiveReadRateLimit, fetchAllShops);
 shopRouter.route("/start/:shopId").patch(isAdmin, writeRateLimit, makeSellerGoLive);
 shopRouter.route("/nearby").get(isBuyer, buyerReadRateLimit, findNearbyShops);
+shopRouter.route("/:shopId/customers").get(isAdminOrSeller, expensiveReadRateLimit, fetchShopCustomers);
 shopRouter.route("/:shopId/trial").patch(isAdmin, writeRateLimit, setShopTrialPeriod);
 shopRouter.route("/:shopId/timings").patch(isAdminOrSeller, writeRateLimit, setShopTimings);
 shopRouter.route("/:shopId/status").patch(isAdminOrSeller, writeRateLimit, setShopStatus);
+shopRouter.route("/:shopId/availability").patch(isAdminOrSeller, writeRateLimit, toggleShopAvailability);
 shopRouter.route("/:shopId/settings").patch(isAdminOrSeller, uploadRateLimit, upload.fields([{ name: "shopimg", maxCount: 1 }]), editShopSettings);
 shopRouter.route("/find/:shopId").get(buyerReadRateLimit, findFullShopData);
 shopRouter.route("/findshop/:slug").get(buyerReadRateLimit, findByShopSlug);

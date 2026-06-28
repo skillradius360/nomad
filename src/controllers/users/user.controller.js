@@ -1,7 +1,7 @@
 import { prisma } from "../../db/index.js";
 import { apiError, apiResponse, asyncHandler } from "../../utils/handler.js";
 import { cloudUploader } from "../../utils/cloudinary.upload.js";
-import { threadCpuUsage } from "process";
+import { Prisma } from "@prisma/client";
 
 const userEditableFields = [
     "email",
@@ -35,6 +35,71 @@ const getOverviewTake = (req) => {
     if(!Number.isInteger(take) || take < 1) throw new apiError(400,"Invalid take value");
     return Math.min(take,50);
 };
+
+const getAdminShopPagination = (query) => {
+    const page = Number(query.page || 1);
+    const limit = Number(query.limit || query.take || 20);
+
+    if(!Number.isInteger(page) || page < 1) throw new apiError(400,"Invalid page value");
+    if(!Number.isInteger(limit) || limit < 1) throw new apiError(400,"Invalid limit value");
+
+    const normalizedLimit = Math.min(limit,100);
+    return {
+        page,
+        limit:normalizedLimit,
+        skip:(page - 1) * normalizedLimit
+    };
+};
+
+const parseAdminBooleanFilter = (value,fieldName) => {
+    if(value === undefined || value === null || value === "") return undefined;
+    if(typeof value === "boolean") return value;
+    const normalizedValue = String(value).trim().toLowerCase();
+    if(["true","1","yes"].includes(normalizedValue)) return true;
+    if(["false","0","no"].includes(normalizedValue)) return false;
+    throw new apiError(400,`${fieldName} must be true or false`);
+};
+
+const formatAdminShopRow = (shop)=>({
+    id:shop.id,
+    shopName:shop.shopName,
+    slug:shop.slug,
+    shopImage:shop.shopImage,
+    description:shop.Description,
+    verified:shop.Verified,
+    configuredStatus:shop.status,
+    openStatus:shop.ShopOpenStatus,
+    billingStatus:shop.billingStatus,
+    shopBalance:shop.shopBalance,
+    totalSlots:shop.totalSlots,
+    usedSlots:shop.usedSlots,
+    deliveryEnabled:shop.deliveryEnabled,
+    createdAt:shop.createdAt,
+    updatedAt:shop.updatedAt,
+    owner:{
+        id:shop.ownerId,
+        name:shop.ownerName,
+        email:shop.ownerEmail,
+        phone:shop.ownerPhone
+    },
+    shopType:shop.shopTypeId ? {
+        id:shop.shopTypeId,
+        name:shop.shopTypeName,
+        slug:shop.shopTypeSlug
+    } : null,
+    metrics:{
+        totalOrders:Number(shop.totalOrders || 0),
+        completedOrders:Number(shop.completedOrders || 0),
+        cancelledOrders:Number(shop.cancelledOrders || 0),
+        totalRevenue:Number(shop.totalRevenue || 0),
+        paidRevenue:Number(shop.paidRevenue || 0),
+        refundAmount:Number(shop.refundAmount || 0),
+        netRevenue:Number(shop.netRevenue || 0),
+        itemCount:Number(shop.itemCount || 0),
+        comboCount:Number(shop.comboCount || 0),
+        menuCount:Number(shop.menuCount || 0)
+    }
+});
 
 const countByField = (rows, field) => {
     return rows.reduce((result,row)=>{
@@ -494,6 +559,478 @@ const fetchAllUserOverviewData = asyncHandler(async(req,res)=>{
     return res.status(200).json(new apiResponse(200,overview,"User overview data fetched successfully"));
 });
 
+const fetchAdminShops = asyncHandler(async(req,res)=>{
+    const {page,limit,skip} = getAdminShopPagination(req.query);
+    const {
+        search,
+        status,
+        billingStatus,
+        ownerId,
+        shopTypeId,
+        sort,
+        createdFrom,
+        createdTo
+    } = req.query;
+    const verified = parseAdminBooleanFilter(req.query.verified,"verified");
+    const live = parseAdminBooleanFilter(req.query.live,"live");
+
+    const whereClauses = [Prisma.sql`1=1`];
+
+    if(search){
+        const searchValue = `%${String(search).trim()}%`;
+        whereClauses.push(Prisma.sql`(
+            s."shopName" ILIKE ${searchValue}
+            OR s.slug ILIKE ${searchValue}
+            OR u.name ILIKE ${searchValue}
+            OR u.email ILIKE ${searchValue}
+            OR u.phone ILIKE ${searchValue}
+        )`);
+    }
+
+    if(status){
+        const normalizedStatus = String(status).trim().toUpperCase();
+        whereClauses.push(Prisma.sql`(s."ShopOpenStatus"::text = ${normalizedStatus} OR s.status::text = ${normalizedStatus})`);
+    }
+
+    if(billingStatus){
+        whereClauses.push(Prisma.sql`s."billingStatus"::text = ${String(billingStatus).trim().toUpperCase()}`);
+    }
+
+    if(ownerId) whereClauses.push(Prisma.sql`s."ownerId" = ${String(ownerId)}`);
+    if(shopTypeId) whereClauses.push(Prisma.sql`s."shopTypeId" = ${String(shopTypeId)}`);
+    if(verified !== undefined) whereClauses.push(Prisma.sql`s."Verified" = ${verified}`);
+    if(live !== undefined){
+        whereClauses.push(live
+            ? Prisma.sql`s."ShopOpenStatus"::text = 'OPEN'`
+            : Prisma.sql`s."ShopOpenStatus"::text <> 'OPEN'`);
+    }
+    if(createdFrom){
+        const fromDate = new Date(String(createdFrom));
+        if(Number.isNaN(fromDate.getTime())) throw new apiError(400,"createdFrom must be a valid date");
+        whereClauses.push(Prisma.sql`s."createdAt" >= ${fromDate}`);
+    }
+    if(createdTo){
+        const toDate = new Date(String(createdTo));
+        if(Number.isNaN(toDate.getTime())) throw new apiError(400,"createdTo must be a valid date");
+        whereClauses.push(Prisma.sql`s."createdAt" <= ${toDate}`);
+    }
+
+    const whereSql = Prisma.sql`WHERE ${Prisma.join(whereClauses,Prisma.sql` AND `)}`;
+    const sortKey = String(sort || "newJoinings").trim().toLowerCase();
+    const orderSql = {
+        highestsales:Prisma.sql`"completedOrders" DESC, s."createdAt" DESC`,
+        sales:Prisma.sql`"completedOrders" DESC, s."createdAt" DESC`,
+        orders:Prisma.sql`"totalOrders" DESC, s."createdAt" DESC`,
+        highestrevenue:Prisma.sql`"totalRevenue" DESC, s."createdAt" DESC`,
+        revenue:Prisma.sql`"totalRevenue" DESC, s."createdAt" DESC`,
+        netrevenue:Prisma.sql`"netRevenue" DESC, s."createdAt" DESC`,
+        newjoinings:Prisma.sql`s."createdAt" DESC`,
+        newest:Prisma.sql`s."createdAt" DESC`,
+        oldest:Prisma.sql`s."createdAt" ASC`,
+        name:Prisma.sql`s."shopName" ASC`,
+        balance:Prisma.sql`s."shopBalance" DESC, s."createdAt" DESC`
+    }[sortKey];
+
+    if(!orderSql){
+        throw new apiError(400,"sort must be one of highestSales, highestRevenue, newJoinings, newest, oldest, name, balance");
+    }
+
+    const [countRows,shops] = await Promise.all([
+        prisma.$queryRaw`
+            SELECT COUNT(*)::int AS total
+            FROM "Shop" s
+            JOIN "User" u ON u.id = s."ownerId"
+            LEFT JOIN "ShopType" st ON st.id = s."shopTypeId"
+            ${whereSql}
+        `,
+        prisma.$queryRaw`
+            SELECT
+                s.id,
+                s."shopName",
+                s.slug,
+                s."shopImage",
+                s."Description",
+                s."Verified",
+                s.status,
+                s."ShopOpenStatus",
+                s."billingStatus",
+                s."shopBalance",
+                s."totalSlots",
+                s."usedSlots",
+                s."deliveryEnabled",
+                s."createdAt",
+                s."updatedAt",
+                s."ownerId",
+                u.name AS "ownerName",
+                u.email AS "ownerEmail",
+                u.phone AS "ownerPhone",
+                s."shopTypeId",
+                st.name AS "shopTypeName",
+                st.slug AS "shopTypeSlug",
+                COALESCE(order_metrics."totalOrders",0)::int AS "totalOrders",
+                COALESCE(order_metrics."completedOrders",0)::int AS "completedOrders",
+                COALESCE(order_metrics."cancelledOrders",0)::int AS "cancelledOrders",
+                COALESCE(order_metrics."totalRevenue",0)::int AS "totalRevenue",
+                COALESCE(order_metrics."paidRevenue",0)::int AS "paidRevenue",
+                COALESCE(order_metrics."refundAmount",0)::int AS "refundAmount",
+                COALESCE(order_metrics."netRevenue",0)::int AS "netRevenue",
+                COALESCE(item_metrics."itemCount",0)::int AS "itemCount",
+                COALESCE(combo_metrics."comboCount",0)::int AS "comboCount",
+                COALESCE(menu_metrics."menuCount",0)::int AS "menuCount"
+            FROM "Shop" s
+            JOIN "User" u ON u.id = s."ownerId"
+            LEFT JOIN "ShopType" st ON st.id = s."shopTypeId"
+            LEFT JOIN (
+                SELECT
+                    o."shopId",
+                    COUNT(o.id)::int AS "totalOrders",
+                    COUNT(o.id) FILTER (WHERE o."currentOrderStatus" = 'DONE')::int AS "completedOrders",
+                    COUNT(o.id) FILTER (WHERE o."currentOrderStatus" = 'CANCELLED')::int AS "cancelledOrders",
+                    COALESCE(SUM(o."totalAmount") FILTER (WHERE o."currentOrderStatus" = 'DONE'),0)::int AS "totalRevenue",
+                    COALESCE(SUM(o."paidAmount") FILTER (WHERE o."currentOrderStatus" = 'DONE'),0)::int AS "paidRevenue",
+                    COALESCE(SUM(o."refundAmount"),0)::int AS "refundAmount",
+                    COALESCE(SUM(o."paidAmount" - o."refundAmount") FILTER (WHERE o."currentOrderStatus" = 'DONE'),0)::int AS "netRevenue"
+                FROM "Order" o
+                GROUP BY o."shopId"
+            ) order_metrics ON order_metrics."shopId" = s.id
+            LEFT JOIN (
+                SELECT si."shopId", COUNT(si.id)::int AS "itemCount"
+                FROM "ShopItem" si
+                GROUP BY si."shopId"
+            ) item_metrics ON item_metrics."shopId" = s.id
+            LEFT JOIN (
+                SELECT c."shopId", COUNT(c.id)::int AS "comboCount"
+                FROM "Combo" c
+                GROUP BY c."shopId"
+            ) combo_metrics ON combo_metrics."shopId" = s.id
+            LEFT JOIN (
+                SELECT m."shopId", COUNT(m.id)::int AS "menuCount"
+                FROM "Menu" m
+                GROUP BY m."shopId"
+            ) menu_metrics ON menu_metrics."shopId" = s.id
+            ${whereSql}
+            ORDER BY ${orderSql}
+            LIMIT ${limit}
+            OFFSET ${skip}
+        `
+    ]);
+
+    const total = Number(countRows?.[0]?.total || 0);
+
+    return res.status(200).json(new apiResponse(200,{
+        shops:shops.map(formatAdminShopRow),
+        pagination:{
+            page,
+            limit,
+            total,
+            totalPages:Math.ceil(total / limit),
+            hasNextPage:page * limit < total,
+            hasPrevPage:page > 1
+        },
+        filters:{
+            search:search || null,
+            status:status || null,
+            billingStatus:billingStatus || null,
+            ownerId:ownerId || null,
+            shopTypeId:shopTypeId || null,
+            verified:verified ?? null,
+            live:live ?? null,
+            createdFrom:createdFrom || null,
+            createdTo:createdTo || null,
+            sort:sort || "newJoinings"
+        }
+    },"admin shops fetched successfully"));
+});
+
+const fetchAdminShopById = asyncHandler(async(req,res)=>{
+    const {shopId} = req.params;
+    if(!shopId) throw new apiError(400,"shop id is required");
+
+    const [shop] = await prisma.$queryRaw`
+        SELECT
+            s.id,
+            s."shopName",
+            s.slug,
+            s."shopImage",
+            s."Address",
+            s."Tags",
+            s."Description",
+            s."Verified",
+            s.status,
+            s."ShopOpenStatus",
+            s."billingStatus",
+            s."shopBalance",
+            s."totalSlots",
+            s."usedSlots",
+            s."trialStartedAt",
+            s."trialDays",
+            s."trialEndsAt",
+            s."deliveryEnabled",
+            s."MinimumDeliveryRate",
+            s."FreeDeliveryRate",
+            s.latitude,
+            s.longitude,
+            s."createdAt",
+            s."updatedAt",
+            s."ownerId",
+            u.name AS "ownerName",
+            u.email AS "ownerEmail",
+            u.phone AS "ownerPhone",
+            u."profileImg" AS "ownerProfileImg",
+            s."shopTypeId",
+            st.name AS "shopTypeName",
+            st.slug AS "shopTypeSlug",
+            COALESCE(order_metrics."totalOrders",0)::int AS "totalOrders",
+            COALESCE(order_metrics."completedOrders",0)::int AS "completedOrders",
+            COALESCE(order_metrics."cancelledOrders",0)::int AS "cancelledOrders",
+            COALESCE(order_metrics."totalRevenue",0)::int AS "totalRevenue",
+            COALESCE(order_metrics."paidRevenue",0)::int AS "paidRevenue",
+            COALESCE(order_metrics."refundAmount",0)::int AS "refundAmount",
+            COALESCE(order_metrics."netRevenue",0)::int AS "netRevenue",
+            COALESCE(item_metrics."itemCount",0)::int AS "itemCount",
+            COALESCE(combo_metrics."comboCount",0)::int AS "comboCount",
+            COALESCE(menu_metrics."menuCount",0)::int AS "menuCount"
+        FROM "Shop" s
+        JOIN "User" u ON u.id = s."ownerId"
+        LEFT JOIN "ShopType" st ON st.id = s."shopTypeId"
+        LEFT JOIN (
+            SELECT
+                o."shopId",
+                COUNT(o.id)::int AS "totalOrders",
+                COUNT(o.id) FILTER (WHERE o."currentOrderStatus" = 'DONE')::int AS "completedOrders",
+                COUNT(o.id) FILTER (WHERE o."currentOrderStatus" = 'CANCELLED')::int AS "cancelledOrders",
+                COALESCE(SUM(o."totalAmount") FILTER (WHERE o."currentOrderStatus" = 'DONE'),0)::int AS "totalRevenue",
+                COALESCE(SUM(o."paidAmount") FILTER (WHERE o."currentOrderStatus" = 'DONE'),0)::int AS "paidRevenue",
+                COALESCE(SUM(o."refundAmount"),0)::int AS "refundAmount",
+                COALESCE(SUM(o."paidAmount" - o."refundAmount") FILTER (WHERE o."currentOrderStatus" = 'DONE'),0)::int AS "netRevenue"
+            FROM "Order" o
+            GROUP BY o."shopId"
+        ) order_metrics ON order_metrics."shopId" = s.id
+        LEFT JOIN (
+            SELECT si."shopId", COUNT(si.id)::int AS "itemCount"
+            FROM "ShopItem" si
+            GROUP BY si."shopId"
+        ) item_metrics ON item_metrics."shopId" = s.id
+        LEFT JOIN (
+            SELECT c."shopId", COUNT(c.id)::int AS "comboCount"
+            FROM "Combo" c
+            GROUP BY c."shopId"
+        ) combo_metrics ON combo_metrics."shopId" = s.id
+        LEFT JOIN (
+            SELECT m."shopId", COUNT(m.id)::int AS "menuCount"
+            FROM "Menu" m
+            GROUP BY m."shopId"
+        ) menu_metrics ON menu_metrics."shopId" = s.id
+        WHERE s.id = ${shopId}
+        LIMIT 1
+    `;
+
+    if(!shop) throw new apiError(404,"shop not found");
+
+    const recentOrders = await prisma.order.findMany({
+        where:{
+            shopId
+        },
+        take:10,
+        orderBy:{
+            createdAt:"desc"
+        },
+        select:{
+            id:true,
+            currentOrderStatus:true,
+            paymentMethod:true,
+            paymentReceived:true,
+            totalAmount:true,
+            paidAmount:true,
+            refundAmount:true,
+            createdAt:true,
+            user:{
+                select:{
+                    id:true,
+                    name:true,
+                    phone:true
+                }
+            }
+        }
+    });
+
+    return res.status(200).json(new apiResponse(200,{
+        ...formatAdminShopRow(shop),
+        address:shop.Address,
+        tags:shop.Tags,
+        trial:{
+            startedAt:shop.trialStartedAt,
+            days:shop.trialDays,
+            endsAt:shop.trialEndsAt
+        },
+        delivery:{
+            enabled:shop.deliveryEnabled,
+            minimumRate:shop.MinimumDeliveryRate,
+            freeRate:shop.FreeDeliveryRate
+        },
+        location:{
+            latitude:shop.latitude,
+            longitude:shop.longitude
+        },
+        owner:{
+            id:shop.ownerId,
+            name:shop.ownerName,
+            email:shop.ownerEmail,
+            phone:shop.ownerPhone,
+            profileImg:shop.ownerProfileImg
+        },
+        recentOrders
+    },"admin shop details fetched successfully"));
+});
+
+const fetchAdminBuyerById = asyncHandler(async(req,res)=>{
+    const {buyerId} = req.params;
+    if(!buyerId) throw new apiError(400,"buyer id is required");
+
+    const buyer = await prisma.user.findFirst({
+        where:{id:buyerId,role:"BUYER"},
+        select:{
+            id:true,
+            name:true,
+            email:true,
+            phone:true,
+            profileImg:true,
+            billingPlan:true,
+            isVerified:true,
+            isBlocked:true,
+            createdAt:true,
+            updatedAt:true,
+            orders:{
+                take:10,
+                orderBy:{createdAt:"desc"},
+                select:{
+                    id:true,
+                    shopId:true,
+                    currentOrderStatus:true,
+                    totalAmount:true,
+                    paidAmount:true,
+                    refundAmount:true,
+                    createdAt:true,
+                    shop:{select:{id:true,shopName:true}}
+                }
+            },
+            _count:{select:{orders:true}}
+        }
+    });
+
+    if(!buyer) throw new apiError(404,"buyer not found");
+
+    const totals = await prisma.order.aggregate({
+        where:{userId:buyerId,currentOrderStatus:"DONE"},
+        _count:{id:true},
+        _sum:{totalAmount:true,paidAmount:true,refundAmount:true}
+    });
+
+    return res.status(200).json(new apiResponse(200,{
+        ...buyer,
+        summary:{
+            completedOrders:totals._count.id || 0,
+            grossSpend:totals._sum.totalAmount || 0,
+            paidAmount:totals._sum.paidAmount || 0,
+            refundAmount:totals._sum.refundAmount || 0,
+            netSpend:(totals._sum.paidAmount || 0) - (totals._sum.refundAmount || 0)
+        }
+    },"admin buyer details fetched successfully"));
+});
+
+const fetchAdminSellerById = asyncHandler(async(req,res)=>{
+    const {sellerId} = req.params;
+    if(!sellerId) throw new apiError(400,"seller id is required");
+
+    const seller = await prisma.user.findFirst({
+        where:{id:sellerId,role:"SELLER"},
+        select:{
+            id:true,
+            name:true,
+            email:true,
+            phone:true,
+            profileImg:true,
+            billingPlan:true,
+            isVerified:true,
+            isBlocked:true,
+            createdAt:true,
+            updatedAt:true,
+            shops:{
+                orderBy:{createdAt:"desc"},
+                select:{
+                    id:true,
+                    shopName:true,
+                    slug:true,
+                    ShopOpenStatus:true,
+                    status:true,
+                    Verified:true,
+                    billingStatus:true,
+                    shopBalance:true,
+                    totalSlots:true,
+                    usedSlots:true,
+                    createdAt:true
+                }
+            }
+        }
+    });
+
+    if(!seller) throw new apiError(404,"seller not found");
+
+    const shopIds = seller.shops.map((shop)=>shop.id);
+    const totals = shopIds.length ? await prisma.order.aggregate({
+        where:{shopId:{in:shopIds},currentOrderStatus:"DONE"},
+        _count:{id:true},
+        _sum:{totalAmount:true,paidAmount:true,refundAmount:true}
+    }) : {_count:{id:0},_sum:{}};
+
+    return res.status(200).json(new apiResponse(200,{
+        ...seller,
+        summary:{
+            shopCount:seller.shops.length,
+            completedOrders:totals._count.id || 0,
+            grossRevenue:totals._sum.totalAmount || 0,
+            paidRevenue:totals._sum.paidAmount || 0,
+            refundAmount:totals._sum.refundAmount || 0,
+            netRevenue:(totals._sum.paidAmount || 0) - (totals._sum.refundAmount || 0)
+        }
+    },"admin seller details fetched successfully"));
+});
+
+const updateAdminUserStatus = asyncHandler(async(req,res)=>{
+    const userId = req.params.buyerId || req.params.sellerId;
+    const expectedRole = req.params.buyerId ? "BUYER" : "SELLER";
+    if(!userId) throw new apiError(400,"user id is required");
+
+    const {isBlocked, blocked, status} = req.body;
+    const dataToUpdate = {};
+
+    if(isBlocked !== undefined || blocked !== undefined){
+        dataToUpdate.isBlocked = Boolean(isBlocked ?? blocked);
+    }else if(status !== undefined){
+        const normalizedStatus = String(status).trim().toUpperCase();
+        if(!["ACTIVE","BLOCKED","SUSPENDED"].includes(normalizedStatus)){
+            throw new apiError(400,"status must be ACTIVE, BLOCKED, or SUSPENDED");
+        }
+        dataToUpdate.isBlocked = normalizedStatus !== "ACTIVE";
+    }else{
+        throw new apiError(400,"isBlocked or status is required");
+    }
+
+    const user = await prisma.user.findFirst({
+        where:{id:userId,role:expectedRole},
+        select:{id:true}
+    });
+    if(!user) throw new apiError(404,`${expectedRole.toLowerCase()} not found`);
+
+    const updatedUser = await prisma.user.update({
+        where:{id:userId},
+        data:dataToUpdate,
+        select:{id:true,name:true,email:true,phone:true,role:true,isBlocked:true}
+    });
+
+    return res.status(200).json(new apiResponse(200,updatedUser,`${expectedRole.toLowerCase()} status updated successfully`));
+});
+
 
 const fetchUserProfile = asyncHandler(async (req, res) => {
     const id = req.userData?.id;
@@ -764,4 +1301,19 @@ const fetchAllBuyers= asyncHandler(async(req,res)=>{
 })
 
 
-export { fetchAllUsers, fetchAllUserOverviewData, fetchUserProfile, deleteUser, editUserData, editOwnUserData, toggleUserSuspension ,fetchAllSellers,fetchAllBuyers};
+export {
+    fetchAllUsers,
+    fetchAllUserOverviewData,
+    fetchAdminShops,
+    fetchAdminShopById,
+    fetchAdminBuyerById,
+    fetchAdminSellerById,
+    updateAdminUserStatus,
+    fetchUserProfile,
+    deleteUser,
+    editUserData,
+    editOwnUserData,
+    toggleUserSuspension,
+    fetchAllSellers,
+    fetchAllBuyers
+};

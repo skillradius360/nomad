@@ -567,6 +567,228 @@ const fetchOfferById = asyncHandler(async(req,res)=>{
     return res.status(200).json(new apiResponse(200,offer,"offer fetched successfully"));
 });
 
+const duplicateOffer = asyncHandler(async(req,res)=>{
+    const { offerId } = req.params;
+    if(!offerId) throw new apiError(400,"offer id is required");
+
+    const currentUser = await prisma.user.findUnique({
+        where:{id:req.userData?.id},
+        select:{id:true,role:true,isBlocked:true}
+    });
+    if(!currentUser || currentUser.isBlocked) throw new apiError(401,"User blocked or unauthorized");
+    if(currentUser.role !== "SELLER" && currentUser.role !== "ADMIN") throw new apiError(403,"Seller or admin access required");
+
+    const existingOffer = await prisma.offer.findUnique({
+        where:{id:offerId},
+        include:offerInclude
+    });
+    if(!existingOffer) throw new apiError(404,"offer not found");
+    if(currentUser.role === "SELLER" && existingOffer.shop.ownerId !== currentUser.id){
+        throw new apiError(403,"You can only duplicate offers for your own shop");
+    }
+
+    const duplicatedOffer = await prisma.offer.create({
+        data:{
+            shopId:existingOffer.shopId,
+            title:req.body.title || `${existingOffer.title} Copy`,
+            description:existingOffer.description,
+            offerType:existingOffer.offerType,
+            active:false,
+            startsAt:existingOffer.startsAt,
+            endsAt:existingOffer.endsAt,
+            menuScope:existingOffer.menuScope,
+            applyTo:existingOffer.applyTo,
+            audienceType:existingOffer.audienceType,
+            stackingMode:existingOffer.stackingMode,
+            minQuantity:existingOffer.minQuantity,
+            minOrderAmount:existingOffer.minOrderAmount,
+            discountType:existingOffer.discountType,
+            discountValue:existingOffer.discountValue,
+            maxDiscountAmount:existingOffer.maxDiscountAmount,
+            rewardQuantity:existingOffer.rewardQuantity,
+            imageUrl:existingOffer.imageUrl,
+            menus:existingOffer.menus.length ? {
+                create:existingOffer.menus.map((menu)=>({menuId:menu.menuId}))
+            } : undefined,
+            items:existingOffer.items.length ? {
+                create:existingOffer.items.map((item)=>({
+                    shopItemId:item.shopItemId,
+                    role:item.role
+                }))
+            } : undefined,
+            combos:existingOffer.combos.length ? {
+                create:existingOffer.combos.map((combo)=>({
+                    comboId:combo.comboId,
+                    role:combo.role
+                }))
+            } : undefined,
+            buyers:existingOffer.buyers.length ? {
+                create:existingOffer.buyers.map((buyer)=>({buyerId:buyer.buyerId}))
+            } : undefined,
+            tags:existingOffer.tags.length ? {
+                create:existingOffer.tags.map((tag)=>({tagId:tag.tagId}))
+            } : undefined
+        },
+        include:offerInclude
+    });
+
+    return res.status(201).json(new apiResponse(201,formatOfferListItem(duplicatedOffer),"offer duplicated successfully"));
+});
+
+const fetchOfferUsage = asyncHandler(async(req,res)=>{
+    const { offerId } = req.params;
+    if(!offerId) throw new apiError(400,"offer id is required");
+
+    const currentUser = await prisma.user.findUnique({
+        where:{id:req.userData?.id},
+        select:{id:true,role:true,isBlocked:true}
+    });
+    if(!currentUser || currentUser.isBlocked) throw new apiError(401,"User blocked or unauthorized");
+
+    const offer = await prisma.offer.findUnique({
+        where:{id:offerId},
+        include:{shop:{select:{id:true,shopName:true,ownerId:true}}}
+    });
+    if(!offer) throw new apiError(404,"offer not found");
+    if(currentUser.role === "SELLER" && offer.shop.ownerId !== currentUser.id){
+        throw new apiError(403,"You can only fetch usage for your own shop offers");
+    }
+    if(currentUser.role !== "ADMIN" && currentUser.role !== "SELLER"){
+        throw new apiError(403,"Seller or admin access required");
+    }
+
+    const pagination = getPagination(req.query,{defaultLimit:20,maxLimit:100});
+    const orderWhere = {
+        shopId:offer.shopId,
+        currentOrderStatus:"DONE",
+        completedAt:{
+            gte:offer.startsAt,
+            lte:offer.endsAt
+        },
+        OR:[
+            {discountAmount:{gt:0}},
+            {deliveryDiscountAmount:{gt:0}}
+        ]
+    };
+    const [usage,total] = await Promise.all([
+        prisma.order.findMany({
+            where:orderWhere,
+            orderBy:{completedAt:"desc"},
+            skip:pagination.skip,
+            take:pagination.take,
+            select:{
+                id:true,
+                totalAmount:true,
+                paidAmount:true,
+                discountAmount:true,
+                deliveryDiscountAmount:true,
+                completedAt:true,
+                createdAt:true,
+                currentOrderStatus:true,
+                user:{select:{id:true,name:true,phone:true,email:true}}
+            }
+        }),
+        prisma.order.count({where:orderWhere})
+    ]);
+
+    return res.status(200).json(new apiResponse(200,{
+        offer:{id:offer.id,title:offer.title,shop:offer.shop},
+        note:"Usage is estimated from completed discounted orders during this offer window because per-offer redemption rows are not stored yet.",
+        pagination:buildPaginationMeta({page:pagination.page,limit:pagination.limit,total}),
+        usage:usage.map((order)=>({
+            id:order.id,
+            completedAt:order.completedAt,
+            createdAt:order.createdAt,
+            status:order.currentOrderStatus,
+            totalAmount:order.totalAmount,
+            paidAmount:order.paidAmount,
+            discountAmount:order.discountAmount,
+            deliveryDiscountAmount:order.deliveryDiscountAmount,
+            buyer:order.user
+        }))
+    },"offer usage fetched successfully"));
+});
+
+const fetchOfferAnalytics = asyncHandler(async(req,res)=>{
+    const { offerId } = req.params;
+    if(!offerId) throw new apiError(400,"offer id is required");
+
+    const currentUser = await prisma.user.findUnique({
+        where:{id:req.userData?.id},
+        select:{id:true,role:true,isBlocked:true}
+    });
+    if(!currentUser || currentUser.isBlocked) throw new apiError(401,"User blocked or unauthorized");
+
+    const offer = await prisma.offer.findUnique({
+        where:{id:offerId},
+        include:{shop:{select:{id:true,shopName:true,ownerId:true}}}
+    });
+    if(!offer) throw new apiError(404,"offer not found");
+    if(currentUser.role === "SELLER" && offer.shop.ownerId !== currentUser.id){
+        throw new apiError(403,"You can only fetch analytics for your own shop offers");
+    }
+    if(currentUser.role !== "ADMIN" && currentUser.role !== "SELLER"){
+        throw new apiError(403,"Seller or admin access required");
+    }
+
+    const [totals,daily] = await Promise.all([
+        prisma.order.aggregate({
+            where:{
+                shopId:offer.shopId,
+                currentOrderStatus:"DONE",
+                completedAt:{
+                    gte:offer.startsAt,
+                    lte:offer.endsAt
+                },
+                OR:[
+                    {discountAmount:{gt:0}},
+                    {deliveryDiscountAmount:{gt:0}}
+                ]
+            },
+            _count:{id:true},
+            _sum:{discountAmount:true,deliveryDiscountAmount:true,totalAmount:true,paidAmount:true}
+        }),
+        prisma.$queryRaw`
+            SELECT
+                o."completedAt"::date AS day,
+                COUNT(o.id)::int AS uses,
+                COALESCE(SUM(o."discountAmount"),0)::int AS "discountAmount",
+                COALESCE(SUM(o."deliveryDiscountAmount"),0)::int AS "deliveryDiscountAmount",
+                COALESCE(SUM(o."totalAmount"),0)::int AS "orderRevenue",
+                COALESCE(SUM(o."paidAmount"),0)::int AS "paidRevenue"
+            FROM "Order" o
+            WHERE o."shopId" = ${offer.shopId}
+                AND o."currentOrderStatus" = 'DONE'
+                AND o."completedAt" >= ${offer.startsAt}
+                AND o."completedAt" <= ${offer.endsAt}
+                AND (o."discountAmount" > 0 OR o."deliveryDiscountAmount" > 0)
+            GROUP BY o."completedAt"::date
+            ORDER BY day DESC
+            LIMIT 30
+        `
+    ]);
+
+    return res.status(200).json(new apiResponse(200,{
+        offer:{id:offer.id,title:offer.title,shop:offer.shop},
+        note:"Analytics are estimated from completed discounted orders during this offer window because per-offer redemption rows are not stored yet.",
+        totals:{
+            usageCount:totals._count.id || 0,
+            discountAmount:totals._sum.discountAmount || 0,
+            deliveryDiscountAmount:totals._sum.deliveryDiscountAmount || 0,
+            orderRevenue:totals._sum.totalAmount || 0,
+            paidRevenue:totals._sum.paidAmount || 0
+        },
+        daily:daily.map((row)=>({
+            date:row.day,
+            uses:Number(row.uses || 0),
+            discountAmount:Number(row.discountAmount || 0),
+            deliveryDiscountAmount:Number(row.deliveryDiscountAmount || 0),
+            orderRevenue:Number(row.orderRevenue || 0),
+            paidRevenue:Number(row.paidRevenue || 0)
+        }))
+    },"offer analytics fetched successfully"));
+});
+
 const updateOffer = asyncHandler(async(req,res)=>{
     const { offerId } = req.params;
 
@@ -1155,8 +1377,11 @@ const searchBuyersForOfferTarget = asyncHandler(async(req,res)=>{
 export {
     createOffer,
     deleteOffer,
+    duplicateOffer,
     fetchAvailableOffersByShop,
+    fetchOfferAnalytics,
     fetchOfferById,
+    fetchOfferUsage,
     fetchOffersByShop,
     searchBuyersForOfferTarget,
     updateOffer,

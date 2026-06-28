@@ -6,6 +6,9 @@ import {
     getAllProcessedOrders,
     getMyOrders,
     getOrderCurrentStatus,
+    getOrderDetails,
+    getOrderInvoice,
+    getOrderTimeline,
     getSellerOrders,
     getSellerProcessedOrders,
     markPaymentReceived,
@@ -28,6 +31,9 @@ orderRouter.route("/seller/processed").get(expensiveReadRateLimit, getSellerProc
 
 orderRouter.route("/processed/all").get(expensiveReadRateLimit, getAllProcessedOrders);
 
+orderRouter.route("/:orderId").get(expensiveReadRateLimit, getOrderDetails);
+orderRouter.route("/:orderId/timeline").get(expensiveReadRateLimit, getOrderTimeline);
+orderRouter.route("/:orderId/invoice").get(expensiveReadRateLimit, getOrderInvoice);
 orderRouter.route("/:orderId/status").get(getOrderCurrentStatus);
 orderRouter.route("/:orderId/payment-received").patch(writeRateLimit, markPaymentReceived);
 orderRouter.route("/:orderId/confirm").patch(writeRateLimit, confirmOrder);

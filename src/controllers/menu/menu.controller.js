@@ -4,6 +4,13 @@ import { getOrSetCachedData } from "../../utils/cache.js";
 import { buildPaginationMeta, getPagination } from "../../utils/pagination.js";
 import { shopHasFeature } from "../../utils/shopFeatures.js";
 import { releaseShopSlot, reserveShopSlot } from "../../utils/billing.js";
+import {
+    calculateShopItemLowestPrice,
+    formatShopItemVariantGroups,
+    formatShopItemPricing,
+    hasShopItemVariants,
+    shopItemVariantSelect
+} from "../../utils/shopItemVariants.js";
 
 const VALID_DAYS = ["MONDAY","TUESDAY","WEDNESDAY","THURSDAY","FRIDAY","SATURDAY","SUNDAY"];
 const SCHEDULE_PRESETS = {
@@ -342,84 +349,67 @@ const createMenu = asyncHandler(async(req,res)=>{
     const menu = await prisma.$transaction(async(tx)=>{
         await reserveShopSlot(tx,shopId);
         return tx.menu.create({
-        data:{
-            shopId,
-            name,
-            description,
-            active:active ?? true,
-            sortOrderId:sortOrderId === undefined || sortOrderId === null ? undefined : Number(sortOrderId),
-            schedules:{
-                create:normalizedSchedules
-            },
-            items:{
-                create:normalizedItems.map((item)=>({
-                    itemId:String(item.itemId),
-                    active:item.active,
-                    sortOrderId:item.sortOrderId
-                }))
-            },
-            combos:{
-                create:normalizedCombos.map((combo)=>({
-                    comboId:String(combo.comboId),
-                    active:combo.active,
-                    sortOrderId:combo.sortOrderId
-                }))
-            }
-        },
-            include:{
-            shop:{
-                select:{
-                    id:true,
-                    shopName:true,
-                    ownerId:true
+            data:{
+                shopId,
+                name,
+                description,
+                active:active ?? true,
+                sortOrderId:sortOrderId === undefined || sortOrderId === null ? undefined : Number(sortOrderId),
+                schedules:{
+                    create:normalizedSchedules
+                },
+                items:{
+                    create:normalizedItems.map((item)=>({
+                        itemId:String(item.itemId),
+                        active:item.active,
+                        sortOrderId:item.sortOrderId
+                    }))
+                },
+                combos:{
+                    create:normalizedCombos.map((combo)=>({
+                        comboId:String(combo.comboId),
+                        active:combo.active,
+                        sortOrderId:combo.sortOrderId
+                    }))
                 }
             },
-            schedules:true,
-            items:{
-                select:{
-                    id:true,
-                    active:true,
-                    sortOrderId:true,
-                    item:{
-                        select:{
-                            id:true,
-                            pricing:true,
-                            availableQuantity:true,
-                            imageUrl:true,
-                            description:true,
-                            item:{
-                                select:{
-                                    id:true,
-                                    name:true,
-                                    imageUrl:true,
-                                    categoryId:true
-                                }
-                            }
-                        }
+            select:{
+                id:true,
+                shopId:true,
+                name:true,
+                description:true,
+                active:true,
+                sortOrderId:true,
+                createdAt:true,
+                updatedAt:true,
+                schedules:{
+                    select:{
+                        id:true,
+                        dayOfWeek:true,
+                        startMinute:true,
+                        endMinute:true,
+                        active:true
+                    },
+                    orderBy:{
+                        dayOfWeek:"asc"
+                    }
+                },
+                _count:{
+                    select:{
+                        items:true,
+                        combos:true
                     }
                 }
-            },
-            combos:{
-                select:{
-                    id:true,
-                    active:true,
-                    sortOrderId:true,
-                    combo:{
-                        select:{
-                            id:true,
-                            name:true,
-                            imageUrl:true,
-                            totalPrice:true,
-                            availableQuantity:true
-                        }
-                    }
-                }
-            }
             }
         });
     });
 
-    return res.status(201).json(new apiResponse(201,menu,"menu created successfully"));
+    return res.status(201).json(new apiResponse(201,{
+        ...menu,
+        itemCount:menu._count.items,
+        comboCount:menu._count.combos,
+        _count:undefined
+    },"menu created successfully"));
 });
 
 const editMenu = asyncHandler(async(req,res)=>{
@@ -643,9 +633,20 @@ const editMenu = asyncHandler(async(req,res)=>{
                         select:{
                             id:true,
                             pricing:true,
+                            pricingMode:true,
+                            unit:true,
+                            displayUnit:true,
+                            pricePerUnit:true,
+                            minOrderQuantity:true,
+                            quantityStep:true,
+                            availableQuantityValue:true,
                             availableQuantity:true,
                             imageUrl:true,
                             description:true,
+                            variantGroups:{
+                                orderBy:{sortOrder:"asc"},
+                                select:shopItemVariantSelect
+                            },
                             item:{
                                 select:{
                                     id:true,
@@ -897,9 +898,20 @@ const fetchRunningMenusByShop = asyncHandler(async(req,res)=>{
                         select:{
                             id:true,
                             pricing:true,
+                            pricingMode:true,
+                            unit:true,
+                            displayUnit:true,
+                            pricePerUnit:true,
+                            minOrderQuantity:true,
+                            quantityStep:true,
+                            availableQuantityValue:true,
                             availableQuantity:true,
                             imageUrl:true,
                             description:true,
+                            variantGroups:{
+                                orderBy:{sortOrder:"asc"},
+                                select:shopItemVariantSelect
+                            },
                             item:{
                                 select:{
                                     id:true,
@@ -992,6 +1004,10 @@ const fetchRunningMenusByShop = asyncHandler(async(req,res)=>{
                     itemId:menuItem.item?.item?.id,
                     name:menuItem.item?.item?.name,
                     pricing:menuItem.item?.pricing,
+                    ...formatShopItemPricing(menuItem.item),
+                    lowestPrice:calculateShopItemLowestPrice(menuItem.item),
+                    hasVariants:hasShopItemVariants(menuItem.item),
+                    variantGroups:formatShopItemVariantGroups(menuItem.item?.variantGroups),
                     availableQuantity:menuItem.item?.availableQuantity,
                     imageUrl:menuItem.item?.imageUrl || menuItem.item?.item?.imageUrl || null,
                     description:menuItem.item?.description,

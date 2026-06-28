@@ -1,22 +1,26 @@
-# Frontend API Integration Guide
+# eLabAssist Backend API Route And Controller Flow Guide
 
-This guide is for frontend developers integrating the backend API. It focuses on role-based flows, allowed request shapes, and the data contracts the UI should send.
+This file is the frontend and handoff reference for the live Express backend.
+It is matched against `src/app.js`, every active file in `src/routes`, and the
+controller functions currently exported from `src/controllers`.
 
-Base URL in Postman examples:
-
-```txt
-{{baseUrl}}
-```
-
-Most routes require JWT auth. Send:
+Base URL:
 
 ```txt
-Authorization: Bearer <token>
+{{baseUrl}} = http://localhost:8000
 ```
 
-## Common Response Shape
+Auth:
 
-Successful responses usually follow:
+```txt
+Authorization: Bearer {{accessToken}}
+```
+
+The same `accessToken` collection variable is used for every role. The backend
+checks the user role inside the JWT. Login as an admin when calling admin routes,
+as a seller for seller-owned routes, and as a buyer for buyer routes.
+
+Most JSON success responses use:
 
 ```json
 {
@@ -27,1078 +31,523 @@ Successful responses usually follow:
 }
 ```
 
-Errors are thrown by the backend with an HTTP status and message. Frontend should display `message`.
+Most errors use:
 
-## Important IDs
+```json
+{
+  "success": false,
+  "message": "readable error message",
+  "stack": "development stack"
+}
+```
 
-Use these IDs carefully:
+File upload routes use `multipart/form-data`. Do not manually set
+`Content-Type` when using browser `FormData`.
 
-| Name | Meaning |
+## Core IDs
+
+| ID | Meaning |
 |---|---|
-| `itemId` | Master catalog item ID from `Items` |
-| `shopItemId` | Seller/shop-owned item ID from `ShopItem` |
+| `userId` | User account ID |
+| `buyerId` | Buyer user ID in admin routes, or buyer profile/user relation depending on context |
+| `sellerId` | Seller user ID in admin routes, or seller profile/user relation depending on context |
+| `shopId` | Shop ID |
+| `shopTypeId` | Shop type ID |
+| `cuisineId` | Cuisine ID |
+| `categoryId` | Category ID |
+| `itemId` | Master `Items` ID |
+| `shopItemId` | Seller-owned `ShopItem` ID. Use this for checkout, combos, menus, and shop item offers |
 | `comboId` | Combo ID |
 | `menuId` | Menu ID |
-| `shopId` | Shop ID |
-| `offerId` | Offer ID |
+| `orderId` | Order ID |
 | `adId` | Seller/buyer placement ad ID |
+| `buyerAdId` | Buyer-side global ad ID |
+| `tagId` | Tag ID |
+| `offerId` | Offer ID |
+| `bannerId` | Banner ID |
+| `optionId` | Recharge day/amount option ID |
+| `rechargeId` | Recharge request ID |
 
-For menus, combos, offers, and checkout, use `shopItemId` for items selected from a seller shop. Do not send master `itemId` where a shop-owned item is expected.
-
-## Allowed Values
-
-### Days
-
-```txt
-MONDAY
-TUESDAY
-WEDNESDAY
-THURSDAY
-FRIDAY
-SATURDAY
-SUNDAY
-```
-
-### Shop
+## Common Enums
 
 ```txt
+UserRole: ADMIN | SELLER | BUYER
+DayOfWeek: MONDAY | TUESDAY | WEDNESDAY | THURSDAY | FRIDAY | SATURDAY | SUNDAY
 ShopStatus: OPEN | CLOSED | AUTOMATIC
-ShopTypes: FASTFOOD | VEGETABLES
-```
-
-### Orders
-
-```txt
+ShopFeatureKey: ITEMS | CATEGORIES | CUISINE | MENUS | COMBOS
+ShopItemPricingMode: FIXED | MEASURED
+ShopItemUnit: KG | GRAM | LITER | ML | PIECE | DOZEN | METER | CM | PACKET | BOX | BOTTLE
 PaymentMethod: CASH | CARD | UPI
 OrderStatus: NEW | PREPARING | READY | DONE | CANCELLED
+AdPlacement: SELLER_DASHBOARD | SELLER_HOME | BUYER_EXPLORE | BUYER_SHOP_PAGE
+AdTargetMode: ALL_SELLERS | TARGETED_SELLERS
+OfferType: BUY_X_GET_Y | PERCENT_DISCOUNT | FLAT_DISCOUNT | FREE_DELIVERY | COMBO_DISCOUNT
+OfferApplyTo: ALL_CART | SPECIFIC_ITEMS | SPECIFIC_COMBOS | ALL_ITEMS_IN_SELECTED_COMBOS
+OfferDiscountType: PERCENTAGE | FLAT | FREE
+OfferAudienceType: ALL_BUYERS | SPECIFIC_BUYERS | TAG_BASED | PREMIUM_CUSTOMERS | NEW_CUSTOMERS
+OfferMenuScope: ALL_MENUS | SPECIFIC_MENUS
+OfferStackingMode: EXCLUSIVE | STACKABLE
+BillingRechargeStatus: PENDING | APPROVED | REJECTED
 ```
 
-### Ads
+## Mounted Routers
 
-```txt
-AdPlacement:
-SELLER_DASHBOARD
-SELLER_HOME
-BUYER_EXPLORE
-BUYER_SHOP_PAGE
+| Mount | Route file | Controller area |
+|---|---|---|
+| `/auth` | `src/routes/auth.routes.js` | `src/controllers/auth/Oauth.controller.js` |
+| `/users` | `src/routes/user.routes.js` | `src/controllers/users/user.controller.js` |
+| `/shops` | `src/routes/shop.routes.js` | `src/controllers/shop/shop.controller.js` |
+| `/shop-types` | `src/routes/shopTypes.routes.js` | `src/controllers/shopTypes/shopTypes.controller.js` |
+| `/buyers` | `src/routes/buyer.routes.js` | `src/controllers/buyers/buyer.controller.js` |
+| `/sellers` | `src/routes/seller.routes.js` | `src/controllers/sellers/seller.controller.js` |
+| `/cuisines` | `src/routes/cuisine.routes.js` | `src/controllers/cuisine/cuisine.controller.js` |
+| `/categories` | `src/routes/categories.routes.js` | `src/controllers/categories/categories.controller.js` |
+| `/items` | `src/routes/items.routes.js` | `src/controllers/items/items.controller.js` |
+| `/combos` | `src/routes/combos.routes.js` | `src/controllers/combos/combos.controller.js` |
+| `/menus` | `src/routes/menu.routes.js` | `src/controllers/menu/menu.controller.js` |
+| `/orders` | `src/routes/orders.routes.js` | `src/controllers/orders/orders.controller.js` |
+| `/ads` | `src/routes/ads.routes.js` | `src/controllers/ad/ad.controller.js`, `src/controllers/ad/buyerAd.controller.js` |
+| `/tags` | `src/routes/tags.routes.js` | `src/controllers/tags/tags.controller.js` |
+| `/offers` | `src/routes/offers.routes.js` | `src/controllers/offers/offers.controller.js` |
+| `/revenue` | `src/routes/revenue.routes.js` | `src/controllers/revenue/revenue.controller.js` |
+| `/banners` | `src/routes/banners.routes.js` | `src/controllers/banners/banner.controller.js` |
+| `/billing` | `src/routes/billing.routes.js` | `src/controllers/billing/billing.controller.js` |
+| `/analytics` | `src/routes/analytics.routes.js` | `src/controllers/analytics/analytics.controller.js` |
 
-AdTargetMode:
-ALL_SELLERS
-TARGETED_SELLERS
-```
+## Health And Root
 
-### Offers
+| Method | Route | Access | Controller | Flow |
+|---|---|---|---|---|
+| `GET` | `/` | Public | inline in `src/app.js` | Returns the HTML logo page. |
+| `GET` | `/health` | Public | `healthCheck` in `src/app.js` | Returns a simple health JSON with any decoded user data if present. |
 
-```txt
-OfferType:
-BUY_X_GET_Y
-PERCENT_DISCOUNT
-FLAT_DISCOUNT
-FREE_DELIVERY
-COMBO_DISCOUNT
+## Auth Flow
 
-OfferApplyTo:
-ALL_CART
-SPECIFIC_ITEMS
-SPECIFIC_COMBOS
-ALL_ITEMS_IN_SELECTED_COMBOS
+| Method | Route | Access | Controller | Flow |
+|---|---|---|---|---|
+| `GET` | `/auth/google` | Public | `googleAuth` | Redirects the browser to Google OAuth. |
+| `GET` | `/auth/google/callback?code=` | Public | `googleCallback` | Exchanges Google code, finds/creates user, returns `accessToken`, `refreshToken`, and user data. |
+| `POST` | `/auth/generateOTP` | Public, rate-limited | `otpAuth` | Accepts phone, creates OTP, stores expiry, sends/returns OTP flow data. |
+| `POST` | `/auth/verifyOTP` | Public, rate-limited | `otpCheck` | Accepts `phoneNo` and `otp`, validates active OTP, returns auth tokens and user data. |
+| `DELETE` | `/auth/invalidateOTP` | Public | `invalidateExpiredOtp` | Deletes expired OTP records. |
 
-OfferDiscountType:
-PERCENTAGE
-FLAT
-FREE
+## Users Flow
 
-OfferAudienceType:
-ALL_BUYERS
-SPECIFIC_BUYERS
-TAG_BASED
-PREMIUM_CUSTOMERS
-NEW_CUSTOMERS
+All `/users` routes require `verifyJWT`.
 
-OfferMenuScope:
-ALL_MENUS
-SPECIFIC_MENUS
+| Method | Route | Access | Controller | Flow |
+|---|---|---|---|---|
+| `GET` | `/users/all-data?take=10` | Admin | `fetchAllUserOverviewData` | Builds admin dashboard overview: users, sellers, buyers, orders, revenue, recent activity, and unavailable data flags. |
+| `GET` | `/users` | Admin | `fetchAllUsers` | Lists users with pagination. |
+| `GET` | `/users/admin/shops?page=1&limit=20&sort=highestSales&search=` | Admin | `fetchAdminShops` | Lists shops for admin with pagination, search, status/billing/verified/live filters, and sales/revenue/new-joining sorting. |
+| `GET` | `/users/admin/shops/:shopId` | Admin | `fetchAdminShopById` | Returns one shop detail, owner, shop type, order metrics, item/combo/menu counts, billing/trial/delivery/location, and recent orders. |
+| `GET` | `/users/admin/buyers` | Admin | `fetchAllBuyers` | Lists buyer users. |
+| `GET` | `/users/admin/buyers/:buyerId` | Admin | `fetchAdminBuyerById` | Returns buyer profile, recent orders, order count, and spend summary. |
+| `PATCH` | `/users/admin/buyers/:buyerId/status` | Admin | `updateAdminUserStatus` | Blocks/unblocks buyer using `isBlocked`, `blocked`, or `status: ACTIVE/BLOCKED/SUSPENDED`. |
+| `GET` | `/users/admin/sellers` | Admin | `fetchAllSellers` | Lists seller users. |
+| `GET` | `/users/admin/sellers/:sellerId` | Admin | `fetchAdminSellerById` | Returns seller profile, shops, and revenue/order summary across shops. |
+| `PATCH` | `/users/admin/sellers/:sellerId/status` | Admin | `updateAdminUserStatus` | Blocks/unblocks seller using `isBlocked`, `blocked`, or `status`. |
+| `PATCH` | `/users/suspend/:userId` | Admin | `toggleUserSuspension` | Toggles `isBlocked` for a user. |
+| `GET` | `/users/sellers?skip=0` | Admin | `fetchAllSellers` | Legacy seller list endpoint. |
+| `GET` | `/users/buyers?skip=0` | Admin | `fetchAllBuyers` | Legacy buyer list endpoint. |
+| `DELETE` | `/users/delUser/:userId` | Admin or self | `deleteUser` | Deletes a user account after access check. |
+| `PATCH` | `/users/modUser/:userId` | Admin or self | `editUserData` | Updates another user/self based on access. Admin can modify role/verification style fields. |
+| `GET` | `/users/me` | Authenticated | `fetchUserProfile` | Returns the current user profile. |
+| `PATCH` | `/users/me` | Authenticated | `editOwnUserData` | Updates current user fields and optional `avatar` file. |
 
-OfferStackingMode:
-EXCLUSIVE
-STACKABLE
-```
+## Buyers Flow
 
-## Time And Schedule Rules
+All `/buyers` routes require `verifyJWT`.
 
-The backend stores menu/shop times as minutes after midnight.
+| Method | Route | Access | Controller | Flow |
+|---|---|---|---|---|
+| `POST` | `/buyers/create/:userId` | Admin | `createBuyerByAdmin` | Creates buyer profile for a specific user. |
+| `POST` | `/buyers/create` | Authenticated | `createBuyer` | Creates buyer profile for current user. |
+| `GET` | `/buyers/me` | Buyer | `getBuyerProfile` | Returns buyer profile for current buyer. |
+| `PATCH` | `/buyers/me` | Buyer | `editBuyerProfile` | Updates current buyer profile. |
+| `DELETE` | `/buyers/me` | Buyer | `deleteBuyer` | Deletes current buyer profile/user flow. |
+| `PATCH` | `/buyers/:userId` | Admin or matching buyer | `editBuyerProfile` | Updates a buyer profile by user ID. |
 
-```txt
-12:00 AM = 0
-7:00 AM = 420
-12:00 PM = 720
-7:00 PM = 1140
-11:59 PM = 1439
-```
+## Sellers Flow
 
-The formula is:
+All `/sellers` routes require `verifyJWT`.
 
-```js
-minute = hour * 60 + minute
-```
+| Method | Route | Access | Controller | Flow |
+|---|---|---|---|---|
+| `POST` | `/sellers/create/:userId` | Admin | `createSellerByAdmin` | Creates seller profile for a specific user. |
+| `POST` | `/sellers/create` | Authenticated | `createSeller` | Creates seller profile for current user. |
+| `GET` | `/sellers/me` | Seller | `getSellerProfile` | Returns seller profile and related seller data. |
+| `DELETE` | `/sellers/me` | Seller | `deleteSeller` | Deletes current seller profile/user flow. |
+| `PATCH` | `/sellers/edit` | Seller | `updateSellerProfile` | Updates current seller profile. |
+| `PATCH` | `/sellers/:userId` | Admin or matching seller | `updateSellerProfile` | Updates a seller profile by user ID. |
 
-Menu schedules support two request styles.
+## Shops Flow
 
-### Schedule Preset Style
+All `/shops` routes require `verifyJWT`.
 
-Use this when the UI has simple day presets.
+| Method | Route | Access | Controller | Flow |
+|---|---|---|---|---|
+| `GET` | `/shops?page=1&limit=20` | Authenticated | `fetchAllShops` | Lists shops with pagination for general browsing. |
+| `GET` | `/shops/admin/all?page=1&limit=20` | Admin | `fetchAllShops` | Admin shop list using the same controller with admin access. |
+| `PATCH` | `/shops/start/:shopId` | Admin | `makeSellerGoLive` | Verifies/starts a seller shop and initializes billing/trial status where applicable. |
+| `GET` | `/shops/nearby?radius=10&status=ALL` | Buyer | `findNearbyShops` | Finds nearby shops using buyer location, radius, status, pagination, and distance calculation. |
+| `GET` | `/shops/:shopId/customers?page=1&limit=20` | Admin or shop seller | `fetchShopCustomers` | Lists customers for a shop from completed order history. |
+| `PATCH` | `/shops/:shopId/trial` | Admin | `setShopTrialPeriod` | Sets trial start/end by `trialDays`, `days`, `trialStartedAt`, or `startsAt`. |
+| `PATCH` | `/shops/:shopId/timings` | Admin or shop seller | `setShopTimings` | Replaces/updates shop schedule using opening/closing times, open days, or timing rows. |
+| `PATCH` | `/shops/:shopId/status` | Admin or shop seller | `setShopStatus` | Sets or toggles shop open status: `OPEN`, `CLOSED`, or `AUTOMATIC`. |
+| `PATCH` | `/shops/:shopId/availability` | Admin or shop seller | `toggleShopAvailability` | Toggles or explicitly sets shop open status and delivery availability. |
+| `PATCH` | `/shops/:shopId/settings` | Admin or shop seller | `editShopSettings` | Edits shop profile/settings, image, location, delivery, tags, type, and feature flags such as combos/menus/items. |
+| `GET` | `/shops/find/:shopId` | Authenticated | `findFullShopData` | Returns full shop detail for buyer/frontend views including items, combos, menus, banners, and features. |
+| `GET` | `/shops/findshop/:slug` | Authenticated | `findByShopSlug` | Finds a shop by slug. |
+| `DELETE` | `/shops/revoke/:shopId` | Admin | `deleteSeller` in shop controller | Revokes/deletes seller shop access for a shop. |
+| `POST` | `/shops/create` | Admin or seller | `createShop` | Creates a shop with optional `shopimg`, location, type, timing/settings fields, and feature configuration. |
 
-Allowed `scheduleType` values:
+## Shop Types And Feature Overrides Flow
 
-```txt
-weekdays
-weekends
-mon-sun
-everyday
-all-days
-```
+All `/shop-types` routes require `verifyJWT`.
 
-Payload:
+| Method | Route | Access | Controller | Flow |
+|---|---|---|---|---|
+| `GET` | `/shop-types?includeInactive=false` | Authenticated | `fetchShopTypes` | Lists active shop types and their default feature keys. |
+| `POST` | `/shop-types` | Admin | `createShopType` | Creates a shop type with `name`, optional `slug`, `description`, `active`, and `features`. |
+| `GET` | `/shop-types/shops/:shopId/features` | Admin | `fetchShopFeatureOverrides` | Returns effective/default/overridden features for one shop. |
+| `PATCH` | `/shop-types/shops/:shopId/features` | Admin | `updateShopFeatureOverrides` | Enables/disables one or multiple features for a shop override. |
+| `DELETE` | `/shop-types/shops/:shopId/features` | Admin | `deleteShopFeatureOverrides` | Removes one, many, or all feature overrides for a shop. |
+| `GET` | `/shop-types/:shopTypeId` | Authenticated | `fetchShopTypeById` | Returns one shop type with features. |
+| `PATCH` | `/shop-types/:shopTypeId` | Admin | `updateShopType` | Updates shop type metadata and feature list. |
+| `DELETE` | `/shop-types/:shopTypeId` | Admin | `deleteShopType` | Deletes a shop type if safe. |
 
-```json
-{
-  "scheduleType": "weekdays",
-  "timeRange": "7am - 7pm"
-}
-```
+## Cuisine Flow
 
-The backend expands this into rows:
+All `/cuisines` routes require `verifyJWT`.
 
-```txt
-weekdays => MONDAY to FRIDAY
-weekends => SATURDAY and SUNDAY
-mon-sun/everyday/all-days => all 7 days
-```
+| Method | Route | Access | Controller | Flow |
+|---|---|---|---|---|
+| `GET` | `/cuisines` | Authenticated | `fetchAllCuisines` | Lists cuisines with category relationships. |
+| `POST` | `/cuisines/create` | Admin | `createCuisine` | Creates a cuisine with name/slug/sort order. |
+| `PATCH` | `/cuisines/reorder` | Admin | `reorderCuisines` | Reorders cuisines by ID array. |
+| `GET` | `/cuisines/fetchallcuisines` | Authenticated | `fetchAllCuisines` | Legacy alias for full cuisine list. |
+| `GET` | `/cuisines/only` | Authenticated | `fetchOnlyCuisines` | Returns compact cuisine rows. |
+| `GET` | `/cuisines/shop/:shopId` | Authenticated | `fetchShopCuisines` | Returns cuisines represented by a shop inventory/menu/combo data. |
+| `PATCH` | `/cuisines/:cuisineId` | Admin | `editCuisine` | Updates cuisine fields. |
+| `DELETE` | `/cuisines/:cuisineId` | Admin | `deleteCuisine` | Deletes a cuisine. |
 
-### Explicit Schedule Rows
+## Categories Flow
 
-Use this when the UI has per-day controls.
+All `/categories` routes require `verifyJWT`.
 
-```json
-{
-  "schedules": [
-    {
-      "dayOfWeek": "MONDAY",
-      "startMinute": 660,
-      "endMinute": 900,
-      "active": true
-    },
-    {
-      "dayOfWeek": "TUESDAY",
-      "startMinute": 660,
-      "endMinute": 900,
-      "active": true
-    }
-  ]
-}
-```
+| Method | Route | Access | Controller | Flow |
+|---|---|---|---|---|
+| `POST` | `/categories/create` | Admin | `createCategory` | Creates a category with optional cuisine mapping and sort order. |
+| `POST` | `/categories/map` | Admin | `mapCategories` | Maps existing or named categories to a cuisine. |
+| `PATCH` | `/categories/reorder` | Admin | `reorderCategories` | Reorders categories, optionally within cuisine context. |
+| `GET` | `/categories/fetchallcategories` | Authenticated | `fetchAllCategories` | Lists categories with related cuisine/items. |
+| `GET` | `/categories/only` | Authenticated | `fetchOnlyCategories` | Returns compact active categories. |
+| `GET` | `/categories/shop/:shopId` | Authenticated | `fetchShopCategories` | Returns categories represented in a shop's inventory/combos/menus. |
+| `GET` | `/categories/cuisine?cuisineName=` | Authenticated | `fetchCategoryToCuisine` | Finds categories by cuisine name query. |
+| `GET` | `/categories/cuisine/:cuisineName` | Authenticated | `fetchCategoryToCuisine` | Finds categories by cuisine name path param. |
+| `PATCH` | `/categories/:categoryId` | Admin | `editCategory` | Updates category metadata/cuisine mapping. |
+| `DELETE` | `/categories/:categoryId` | Admin | `deleteCategory` | Deletes a category. |
 
-For overnight menus, `startMinute` can be greater than `endMinute`.
+## Items, Shop Items, Variants, And Measured Pricing Flow
 
-Example:
+All `/items` routes require `verifyJWT`.
 
-```txt
-8 PM to 2 AM
-startMinute = 1200
-endMinute = 120
-```
+Important rules:
 
-Running menu lookup uses server local time unless the frontend passes test overrides:
+- Master items live in `Items`.
+- Seller inventory lives in `ShopItem`.
+- Use `shopItemId` for checkout, combos, menus, and item offers.
+- Fixed-price shop items use `pricing`.
+- Measured shop items use `pricingMode: MEASURED`, `unit`, `displayUnit`, `pricePerUnit`, `quantityStep`, `minOrderQuantity`, and optional `availableQuantityValue`.
+- Variants are configured on shop items using `variantGroups` and options. They are not a separate route group.
 
-```txt
-GET /menus/shop/{{shopId}}/running?dayOfWeek=MONDAY&currentMinute=720
-```
+| Method | Route | Access | Controller | Flow |
+|---|---|---|---|---|
+| `GET` | `/items?page=1&limit=50` | Authenticated | `fetchAllItems` | Lists master items with pagination and category/tag info. |
+| `POST` | `/items/create` | Admin or seller | `createItems` | Creates master item with optional image, category/cuisine mapping, sort order, and optional `tagIds`. |
+| `POST` | `/items/map` | Admin | `mapItems` | Maps named/existing master items to category and cuisine. |
+| `POST` | `/items/custom` | Seller | `addPersonalProduct` | Adds a master item to a seller shop as `ShopItem`, with fixed or measured pricing, optional variants, image, stock, and description. |
+| `PATCH` | `/items/reorder` | Admin | `reorderItems` | Reorders master items in category/cuisine context. |
+| `PATCH` | `/items/shop-items/reorder` | Admin or seller | `reorderShopItems` | Reorders seller shop items. |
+| `GET` | `/items/fetchallitems` | Authenticated | `fetchAllItems` | Legacy alias for master item list. |
+| `GET` | `/items/only` | Authenticated | `fetchOnlyItems` | Returns compact master item list. |
+| `PATCH` | `/items/shop-items/:shopItemId` | Admin or owner seller | `editShopItem` | Updates shop item pricing, measured fields, variants, image, stock, active state, and description. Sending `variantGroups` replaces variant config. |
+| `DELETE` | `/items/shop-items/:shopItemId` | Admin or owner seller | `deleteShopItem` | Deletes/removes a shop item from seller inventory. |
+| `GET` | `/items/shop/:shopId?page=1&limit=20` | Authenticated | `fetchItemsByShop` | Lists shop inventory with item details, category/cuisine filters, variants, measured pricing, and pagination. |
+| `GET` | `/items/category?categoryName=` | Authenticated | `fetchItemsToCategory` | Lists master items by category from query/body. |
+| `GET` | `/items/category/:categoryName` | Authenticated | `fetchItemsToCategory` | Lists master items by category path param. |
+| `PATCH` | `/items/:itemId` | Admin | `editItem` | Updates master item fields, image, category/cuisine, tags, active state, and sort order. |
+| `DELETE` | `/items/:itemId` | Admin | `deleteItem` | Deletes/deactivates a master item. |
 
-## Seller Flow
+## Combos Flow
 
-### 1. Become/Create Seller Profile
+All `/combos` routes require `verifyJWT`.
 
-```txt
-POST /sellers/create
-GET /sellers/me
-PATCH /sellers/edit
-DELETE /sellers/me
-```
+| Method | Route | Access | Controller | Flow |
+|---|---|---|---|---|
+| `GET` | `/combos/builder?shopId=&categoryId=` | Authenticated | `comboBuilder` | Returns shop-owned inventory data needed to build a combo. |
+| `GET` | `/combos/classification?shopId=&cuisineName=&categoryName=` | Authenticated | `fetchCombosByClassification` | Lists combos filtered by shop and classification. |
+| `GET` | `/combos/shop/:shopId?page=1&limit=20` | Authenticated | `getCombosByShop` | Lists active shop combos with lowest item pricing support for menus/combo UI. |
+| `POST` | `/combos/create` | Seller or admin by controller checks | `createCombo` | Creates combo from shop item IDs, computes total price/final price, validates ownership and measured-item restrictions. |
+| `PATCH` | `/combos/:comboId` | Seller or admin by controller checks | `editCombo` | Updates combo metadata, classification, active state, stock, and replaces combo items if provided. |
+| `DELETE` | `/combos/:comboId` | Seller or admin by controller checks | `deleteCombo` | Deletes a combo after ownership/access checks. |
 
-Create seller payload:
+## Menus Flow
 
-```json
-{
-  "name": "Demo Seller",
-  "address": "Park Street, Kolkata",
-  "latitude": 22.5548,
-  "longitude": 88.3516
-}
-```
+All `/menus` routes require `verifyJWT`.
 
-### 2. Create Shop
+Schedule can be sent as preset fields (`scheduleType`, `schedulePreset`, `timeRange`)
+or explicit `schedules` rows.
 
-```txt
-POST /shops/create
-```
+| Method | Route | Access | Controller | Flow |
+|---|---|---|---|---|
+| `GET` | `/menus/shop/:shopId/running?page=1&limit=10` | Authenticated | `fetchRunningMenusByShop` | Returns menus active for current or supplied `dayOfWeek`/`currentMinute`, including items/combos and pagination. |
+| `POST` | `/menus/create` | Seller or admin by controller checks | `createMenu` | Creates menu, validates shop ownership, schedule rows, shop item IDs, combo IDs, and sort order. |
+| `PATCH` | `/menus/reorder` | Seller or admin by controller checks | `reorderMenus` | Reorders menus for a shop. |
+| `PATCH` | `/menus/:menuId` | Seller or admin by controller checks | `editMenu` | Updates menu metadata, active state, schedules, items, and combos. |
+| `DELETE` | `/menus/:menuId` | Seller or admin by controller checks | `deleteMenu` | Deletes a menu after access checks. |
 
-Use `multipart/form-data`:
+## Orders Flow
 
-```txt
-shopName: Demo Shop
-description: Fast food shop
-shopCategory: FASTFOOD
-latitude: 22.5548
-longitude: 88.3516
-shopimg: <file>
-```
+All `/orders` routes require `verifyJWT`.
 
-Important: shop timings are not created in this payload now. Use shop timings endpoint separately.
-
-### 3. Set Shop Timings
-
-```txt
-PATCH /shops/{{shopId}}/timings
-```
-
-Payload:
-
-```json
-{
-  "shopOpenStatus": "AUTOMATIC",
-  "timings": [
-    {
-      "dayOfWeek": "MONDAY",
-      "openingTime": "9:00am",
-      "closingTime": "10:30pm"
-    },
-    {
-      "dayOfWeek": "TUESDAY",
-      "openingTime": "10:00",
-      "closingTime": "18:00"
-    }
-  ]
-}
-```
-
-Time strings accepted by parser:
-
-```txt
-9am
-9:00am
-10:30pm
-18:00
-```
-
-### 4. Toggle Shop Status
-
-```txt
-PATCH /shops/{{shopId}}/status
-```
-
-Payload:
-
-```json
-{
-  "status": "AUTOMATIC"
-}
-```
-
-Allowed:
-
-```txt
-OPEN
-CLOSED
-AUTOMATIC
-```
-
-### 5. Seller Adds Item To Shop
+Main order lifecycle:
 
 ```txt
-POST /items/custom
+Buyer checkout -> NEW
+Seller confirm -> PREPARING
+Seller ready -> READY
+Seller complete -> DONE
+Any allowed actor cancel before completion -> CANCELLED
+Seller refund completed paid order -> DONE with refund amount
 ```
 
-Use `multipart/form-data`:
+| Method | Route | Access | Controller | Flow |
+|---|---|---|---|---|
+| `POST` | `/orders/checkout` | Buyer | `createOrder` | Creates order from shop items/combos, supports fixed items, measured quantity, variants, delivery amount, and offers. Does not complete billing until seller completes order. |
+| `GET` | `/orders/my?page=1&limit=20` | Buyer | `getMyOrders` | Lists current buyer orders. |
+| `GET` | `/orders/seller?page=1&limit=20` | Seller | `getSellerOrders` | Lists active `NEW/PREPARING/READY` orders for seller shops. |
+| `GET` | `/orders/seller/processed?page=1&limit=20` | Seller | `getSellerProcessedOrders` | Lists completed seller orders. |
+| `GET` | `/orders/processed/all?page=1&limit=20&search=` | Admin | `getAllProcessedOrders` | Lists all completed orders, searchable by buyer name, phone, email, or order ID. |
+| `GET` | `/orders/:orderId` | Buyer, owner seller, or admin | `getOrderDetails` | Returns full order detail, buyer/shop info, items, variants, measurements, commission, and completed order record. |
+| `GET` | `/orders/:orderId/timeline` | Buyer, owner seller, or admin | `getOrderTimeline` | Returns timeline steps and current status. |
+| `GET` | `/orders/:orderId/invoice` | Buyer, owner seller, or admin | `getOrderInvoice` | Returns invoice JSON for frontend PDF/print rendering. |
+| `GET` | `/orders/:orderId/status` | Buyer, owner seller, or admin | `getOrderCurrentStatus` | Returns current status and completed status steps. |
+| `PATCH` | `/orders/:orderId/payment-received` | Seller | `markPaymentReceived` | Marks payment received and updates paid amount for non-final seller order. |
+| `PATCH` | `/orders/:orderId/confirm` | Seller | `confirmOrder` | Moves `NEW` order to `PREPARING` and decrements inventory atomically. |
+| `PATCH` | `/orders/:orderId/ready` | Seller | `markOrderReady` | Moves `PREPARING` order to `READY`. |
+| `PATCH` | `/orders/:orderId/complete` | Seller | `markOrderComplete` | Completes order, records paid amount, revenue summaries, buyer completed order, commission charge, and billing data. |
+| `PATCH` | `/orders/:orderId/cancel` | Buyer, owner seller, or admin | `cancelOrder` | Cancels allowed non-final order and restores inventory if needed. |
+| `PATCH` | `/orders/:orderId/refund` | Seller | `refundCompletedOrder` | Refunds paid completed order amount, updates commission adjustment and revenue deltas. |
 
-```txt
-shopId: {{shopId}}
-itemId: {{itemId}}
-pricing: 120
-availableQuantity: 50
-description: Seller-specific item description
-sortOrderId: 1
-active: true
-itemImg: <file>
-```
+## Ads Flow
 
-No item-level discount fields are used. Discounts are handled through offers.
+All `/ads` routes require `verifyJWT`.
 
-To create a custom seller item without existing master item:
-
-```txt
-shopId: {{shopId}}
-itemName: Chicken kebab
-categoryName: Fastfood
-cuisineName: Bengali
-pricing: 150
-availableQuantity: 75
-active: true
-itemImg: <file>
-```
-
-### 6. Fetch Shop Items
-
-```txt
-GET /items/shop/{{shopId}}
-GET /items/shop/{{shopId}}?cuisineName=Bengali&categoryName=Fastfood
-```
-
-Response contains `items[]`; use `items[].id` as `shopItemId`.
-
-### 7. Update Seller Shop Item
+Main ad upload fields:
 
 ```txt
-PATCH /items/shop-items/{{shopItemId}}
+sellerDashboardImg
+sellerHomeImg
+buyerExploreImg
+buyerShopPageImg
+buyerAdImg
 ```
 
-Use `multipart/form-data`:
+| Method | Route | Access | Controller | Flow |
+|---|---|---|---|---|
+| `POST` | `/ads/create` | Authenticated, controller enforces admin style behavior | `createAd` | Creates placement ad with images, active window, target mode, and targeted sellers if provided. |
+| `GET` | `/ads/seller?placement=` | Seller | `fetchSellerAds` | Fetches ads visible to seller dashboard/home placements. |
+| `GET` | `/ads/buyer?placement=&shopId=` | Buyer | `fetchBuyerAds` | Fetches buyer placement ads, optionally scoped to a shop page. |
+| `GET` | `/ads/buyer-ads` | Buyer | `fetchBuyerSideAds` | Fetches active buyer-side ads. |
+| `POST` | `/ads/buyer-ads/admin` | Admin | `createBuyerAd` | Creates buyer-side ad with optional image and target settings. |
+| `GET` | `/ads/buyer-ads/admin?page=1&limit=20` | Admin | `fetchAllBuyerAdsForAdmin` | Lists buyer-side ads for admin management. |
+| `GET` | `/ads/buyer-ads/admin/:buyerAdId` | Admin | `fetchBuyerAdByIdForAdmin` | Gets one buyer-side ad. |
+| `PATCH` | `/ads/buyer-ads/admin/:buyerAdId` | Admin | `updateBuyerAd` | Updates buyer-side ad metadata/image. |
+| `DELETE` | `/ads/buyer-ads/admin/:buyerAdId` | Admin | `deleteBuyerAd` | Deletes buyer-side ad. |
+| `PATCH` | `/ads/buyer-ads/admin/:buyerAdId/active` | Admin | `updateBuyerAdActiveStatus` | Activates/deactivates buyer-side ad. |
+| `PATCH` | `/ads/:adId/active` | Admin | `updateAdActiveStatus` | Activates/deactivates placement ad. |
+| `DELETE` | `/ads/:adId` | Admin | `deleteAd` | Deletes placement ad. |
+| `GET` | `/ads/fetchAll?placement=&shopId=&everything=` | Authenticated | `fetchActiveAds` | Fetches active ads for placement, shop, or admin-style everything mode. |
+
+## Tags Flow
+
+All `/tags` routes require `verifyJWT`.
+
+| Method | Route | Access | Controller | Flow |
+|---|---|---|---|---|
+| `GET` | `/tags/allTags` | Admin or seller | `fetchAllTags` | Lists all tags. |
+| `GET` | `/tags/active` | Authenticated | `fetchActiveTags` | Lists active tags. |
+| `POST` | `/tags/create` | Admin | `createTag` | Creates a tag with name, slug, and active flag. |
+| `POST` | `/tags/items/:itemId` | Admin | `assignTagsToItem` | Assigns existing tags to a master item. |
+| `DELETE` | `/tags/items/:itemId/:tagId` | Admin | `removeTagFromItem` | Removes one tag from a master item. |
+| `POST` | `/tags/combos/:comboId` | Admin | `assignTagsToCombo` | Assigns existing tags to a combo. |
+| `DELETE` | `/tags/combos/:comboId/:tagId` | Admin | `removeTagFromCombo` | Removes one tag from a combo. |
+| `PATCH` | `/tags/:tagId/active` | Admin | `updateTagActiveStatus` | Activates/deactivates a tag. |
+| `GET` | `/tags/:tagId` | Authenticated | `fetchTagById` | Gets one tag. |
+| `PATCH` | `/tags/:tagId` | Admin | `updateTag` | Updates tag name/slug/active fields. |
+| `DELETE` | `/tags/:tagId` | Admin | `deleteTag` | Deletes a tag. |
+
+## Offers Flow
+
+All `/offers` routes require `verifyJWT`.
+
+Offer image field:
 
 ```txt
-pricing: 150
-availableQuantity: 75
-description: Updated seller item
-imageUrl: https://example.com/item.jpg
-sortOrderId: 2
-active: true
+offerImg
 ```
 
-### 8. Create Combo
+| Method | Route | Access | Controller | Flow |
+|---|---|---|---|---|
+| `POST` | `/offers/create` | Seller or admin by controller checks | `createOffer` | Creates offer rules for cart/items/combos, menus, audience, tags, buyers, dates, image, and stacking. |
+| `GET` | `/offers/shop/:shopId/available` | Buyer | `fetchAvailableOffersByShop` | Returns buyer-eligible offers for a shop, including new-customer and audience checks. |
+| `GET` | `/offers/shop/:shopId/buyers/search?query=` | Seller or admin by controller checks | `searchBuyersForOfferTarget` | Searches buyers for targeted offer assignment and returns shop order context. |
+| `GET` | `/offers/shop/:shopId` | Seller/admin by controller checks | `fetchOffersByShop` | Lists offers for one shop. |
+| `POST` | `/offers/:offerId/duplicate` | Seller owner or admin | `duplicateOffer` | Copies an offer and its menus/items/combos/buyers/tags into a new inactive offer. |
+| `GET` | `/offers/:offerId/usage?page=1&limit=20` | Seller owner or admin | `fetchOfferUsage` | Returns estimated offer usage from completed discounted orders during the offer window. |
+| `GET` | `/offers/:offerId/analytics` | Seller owner or admin | `fetchOfferAnalytics` | Returns estimated usage, discount, revenue totals, and daily trend for an offer window. |
+| `PATCH` | `/offers/:offerId/active` | Seller owner or admin | `updateOfferActiveStatus` | Activates/deactivates an offer. |
+| `GET` | `/offers/:offerId` | Authenticated | `fetchOfferById` | Gets one offer with related rules and targets. |
+| `PATCH` | `/offers/:offerId` | Seller owner or admin | `updateOffer` | Updates offer metadata, dates, rules, target menus/items/combos/buyers/tags, and image. |
+| `DELETE` | `/offers/:offerId` | Seller owner or admin | `deleteOffer` | Deletes an offer. |
+
+## Revenue Flow
+
+All `/revenue` routes require `verifyJWT`.
+
+| Method | Route | Access | Controller | Flow |
+|---|---|---|---|---|
+| `GET` | `/revenue/shop/:shopId/repeat-customers?minOrders=2&startDate=&endDate=` | Seller owner or admin by controller checks | `fetchRepeatCustomersByShop` | Finds repeat customers for a shop from completed orders. |
+| `GET` | `/revenue/shop/:shopId?periodType=DAILY&startDate=&endDate=` | Seller owner or admin by controller checks | `fetchShopRevenueStats` | Returns revenue summary and period rows for a shop. |
+
+## Banners Flow
+
+All `/banners` routes require `verifyJWT`.
+
+Banner image fields:
 
 ```txt
-POST /combos/create
+bannerImg
+image
 ```
 
-Payload:
-
-```json
-{
-  "shopId": "{{shopId}}",
-  "name": "Shop Item Test Combo",
-  "description": "Combo using shop item IDs",
-  "imageUrl": "https://example.com/combo.jpg",
-  "cuisineName": "Bengali",
-  "categoryName": "Fastfood",
-  "discount": 10,
-  "percentageDiscount": 0,
-  "availableQuantity": 20,
-  "sortOrderId": 1,
-  "items": [
-    {
-      "itemId": "{{shopItemId}}",
-      "quantity": 1
-    }
-  ]
-}
-```
-
-Combo total is calculated from base shop item prices. Combo-level `discount` and `percentageDiscount` still exist.
-
-### 9. Fetch Combos
-
-```txt
-GET /combos/shop/{{shopId}}
-GET /combos/classification?shopId={{shopId}}&cuisineName=Bengali&categoryName=Fastfood
-GET /combos/builder?shopId={{shopId}}
-```
-
-`/combos/builder` helps frontend discover valid `shopItemId` values.
-
-### 10. Create Menu
-
-```txt
-POST /menus/create
-```
-
-Preset schedule payload:
-
-```json
-{
-  "shopId": "{{shopId}}",
-  "name": "Breakfast Menu",
-  "description": "Available in the morning",
-  "active": true,
-  "sortOrderId": 1,
-  "scheduleType": "weekdays",
-  "timeRange": "7am - 7pm",
-  "items": [
-    {
-      "itemId": "{{shopItemId}}",
-      "active": true,
-      "sortOrderId": 1
-    }
-  ],
-  "combos": [
-    {
-      "comboId": "{{comboId}}",
-      "active": true,
-      "sortOrderId": 2
-    }
-  ]
-}
-```
-
-Explicit schedule payload:
-
-```json
-{
-  "shopId": "{{shopId}}",
-  "name": "Lunch Menu",
-  "active": true,
-  "schedules": [
-    {
-      "dayOfWeek": "MONDAY",
-      "startMinute": 660,
-      "endMinute": 900,
-      "active": true
-    }
-  ],
-  "itemIds": ["{{shopItemId}}"],
-  "comboIds": ["{{comboId}}"]
-}
-```
-
-### 11. Fetch Running Menus
-
-```txt
-GET /menus/shop/{{shopId}}/running
-GET /menus/shop/{{shopId}}/running?dayOfWeek=MONDAY&currentMinute=720
-```
-
-Use the second form for testing.
-
-### 12. Offers Management
-
-```txt
-POST /offers/create
-GET /offers/shop/{{shopId}}
-GET /offers/{{offerId}}
-PATCH /offers/{{offerId}}
-PATCH /offers/{{offerId}}/active
-DELETE /offers/{{offerId}}
-GET /offers/shop/{{shopId}}/buyers/search?query=demo
-```
-
-Cart-level 10% discount:
-
-```json
-{
-  "shopId": "{{shopId}}",
-  "title": "Cart 10% Discount",
-  "description": "10% discount on full cart subtotal",
-  "offerType": "PERCENT_DISCOUNT",
-  "active": true,
-  "startsAt": "2026-06-10T09:00:00.000Z",
-  "endsAt": "2026-06-30T21:00:00.000Z",
-  "menuScope": "ALL_MENUS",
-  "applyTo": "ALL_CART",
-  "minQuantity": 1,
-  "discountType": "PERCENTAGE",
-  "discountValue": 10,
-  "audienceType": "ALL_BUYERS",
-  "stackingMode": "EXCLUSIVE"
-}
-```
-
-Specific item discount:
-
-```json
-{
-  "shopId": "{{shopId}}",
-  "title": "Item Discount",
-  "offerType": "PERCENT_DISCOUNT",
-  "active": true,
-  "startsAt": "2026-06-10T09:00:00.000Z",
-  "endsAt": "2026-06-30T21:00:00.000Z",
-  "menuScope": "ALL_MENUS",
-  "applyTo": "SPECIFIC_ITEMS",
-  "itemIds": ["{{shopItemId}}"],
-  "discountType": "PERCENTAGE",
-  "discountValue": 10,
-  "audienceType": "ALL_BUYERS",
-  "stackingMode": "EXCLUSIVE"
-}
-```
-
-Specific combo discount:
-
-```json
-{
-  "shopId": "{{shopId}}",
-  "title": "Combo Discount",
-  "offerType": "COMBO_DISCOUNT",
-  "active": true,
-  "startsAt": "2026-06-10T09:00:00.000Z",
-  "endsAt": "2026-06-30T21:00:00.000Z",
-  "menuScope": "ALL_MENUS",
-  "applyTo": "SPECIFIC_COMBOS",
-  "comboIds": ["{{comboId}}"],
-  "discountType": "PERCENTAGE",
-  "discountValue": 10,
-  "audienceType": "ALL_BUYERS",
-  "stackingMode": "EXCLUSIVE"
-}
-```
-
-Free delivery:
-
-```json
-{
-  "shopId": "{{shopId}}",
-  "title": "Free Delivery",
-  "offerType": "FREE_DELIVERY",
-  "active": true,
-  "startsAt": "2026-06-10T09:00:00.000Z",
-  "endsAt": "2026-06-30T21:00:00.000Z",
-  "menuScope": "ALL_MENUS",
-  "applyTo": "ALL_CART",
-  "discountType": "FREE",
-  "audienceType": "ALL_BUYERS",
-  "stackingMode": "EXCLUSIVE"
-}
-```
-
-### 13. Seller Order Flow
-
-```txt
-GET /orders/seller
-GET /orders/seller/processed
-PATCH /orders/{{orderId}}/payment-received
-PATCH /orders/{{orderId}}/confirm
-PATCH /orders/{{orderId}}/ready
-PATCH /orders/{{orderId}}/complete
-PATCH /orders/{{orderId}}/refund
-```
-
-Order status flow:
-
-```txt
-NEW -> PREPARING -> READY -> DONE
-```
-
-Confirm order:
-
-```txt
-PATCH /orders/{{orderId}}/confirm
-```
-
-This decrements item/combo inventory.
-
-Mark ready:
-
-```txt
-PATCH /orders/{{orderId}}/ready
-```
-
-Complete order:
-
-```txt
-PATCH /orders/{{orderId}}/complete
-```
-
-Refund completed order:
-
-```txt
-PATCH /orders/{{orderId}}/refund
-```
-
-Body:
-
-```json
-{}
-```
-
-Refund amount is automatic:
-
-```txt
-refund remaining = paidAmount - existingRefundAmount
-```
-
-## Buyer Flow
-
-### 1. Become/Create Buyer Profile
-
-```txt
-POST /buyers/create
-GET /buyers/me
-DELETE /buyers/me
-```
-
-Payload:
-
-```json
-{
-  "name": "Demo Buyer",
-  "address": "Salt Lake, Kolkata",
-  "latitude": 22.5726,
-  "longitude": 88.3639
-}
-```
-
-### 2. Find Nearby Shops
-
-```txt
-GET /shops/nearby?radius=10&status=ALL
-```
-
-Query params:
-
-| Param | Meaning |
-|---|---|
-| `radius` | distance in km |
-| `status` | `ALL`, `OPEN`, `CLOSED`, `AUTOMATIC` |
-
-The buyer must have latitude and longitude saved.
-
-### 3. Shop Details
-
-```txt
-GET /shops/find/{{shopId}}
-GET /shops/findshop/{{slug}}
-```
-
-Use this to show shop page, items, combos, timings, and active data.
-
-### 4. Running Menu
-
-```txt
-GET /menus/shop/{{shopId}}/running
-```
-
-Use this to show currently available menus. For testing:
-
-```txt
-GET /menus/shop/{{shopId}}/running?dayOfWeek=MONDAY&currentMinute=720
-```
-
-### 5. Available Offers
-
-```txt
-GET /offers/shop/{{shopId}}/available
-```
-
-This returns offers available to the current buyer based on audience rules.
-
-### 6. Checkout
-
-```txt
-POST /orders/checkout
-```
-
-Without offer:
-
-```json
-{
-  "shopId": "{{shopId}}",
-  "paymentMethod": "CASH",
-  "paymentReceived": false,
-  "deliveryAmount": 0,
-  "customerNote": "Please prepare fresh.",
-  "items": [
-    {
-      "shopItemId": "{{shopItemId}}",
-      "quantity": 1
-    }
-  ],
-  "combos": [
-    {
-      "comboId": "{{comboId}}",
-      "quantity": 1
-    }
-  ]
-}
-```
-
-With offer:
-
-```json
-{
-  "shopId": "{{shopId}}",
-  "paymentMethod": "CASH",
-  "paymentReceived": false,
-  "deliveryAmount": 0,
-  "offerIds": ["{{offerId}}"],
-  "items": [
-    {
-      "shopItemId": "{{shopItemId}}",
-      "quantity": 1
-    }
-  ],
-  "combos": [
-    {
-      "comboId": "{{comboId}}",
-      "quantity": 1
-    }
-  ]
-}
-```
-
-Offer input can be one of:
-
-```txt
-offerId
-offerIds
-appliedOfferIds
-```
-
-Checkout stores:
-
-```txt
-subtotalAmount = items + combos
-discountAmount = offer discount on cart/items/combos
-deliveryDiscountAmount = free delivery discount
-totalAmount = subtotalAmount - discountAmount + deliveryAmount - deliveryDiscountAmount
-```
-
-### 7. Buyer Orders
-
-```txt
-GET /orders/my
-PATCH /orders/{{orderId}}/cancel
-```
-
-Cancel payload:
-
-```json
-{
-  "refundAmount": 0
-}
-```
-
-## Admin Flow
-
-### 1. Users
-
-```txt
-GET /users
-GET /users/sellers
-GET /users/buyers
-PATCH /users/suspend/{{userId}}
-PATCH /users/modUser/{{userId}}
-DELETE /users/delUser/{{userId}}
-```
-
-Admin can also create buyer/seller profiles for existing users:
-
-```txt
-POST /buyers/create/{{userId}}
-POST /sellers/create/{{userId}}
-```
-
-### 2. Master Cuisines
-
-```txt
-POST /cuisines/create
-GET /cuisines
-GET /cuisines/only
-PATCH /cuisines/reorder
-PATCH /cuisines/{{cuisineId}}
-DELETE /cuisines/{{cuisineId}}
-```
-
-Create payload:
-
-```json
-{
-  "name": "Bengali",
-  "sortOrderId": 1
-}
-```
-
-Reorder payload:
-
-```json
-{
-  "cuisineIds": ["{{cuisineId1}}", "{{cuisineId2}}"]
-}
-```
-
-### 3. Master Categories
-
-```txt
-POST /categories/create
-POST /categories/map
-GET /categories/fetchallcategories
-GET /categories/only
-GET /categories/shop/{{shopId}}
-GET /categories/cuisine?cuisineName=Bengali
-PATCH /categories/reorder
-PATCH /categories/{{categoryId}}
-DELETE /categories/{{categoryId}}
-```
-
-Create payload:
-
-```json
-{
-  "name": "Fastfood",
-  "sortOrderId": 1,
-  "cuisineName": "Bengali"
-}
-```
-
-### 4. Master Items
-
-```txt
-POST /items/create
-POST /items/map
-GET /items
-GET /items/only
-GET /items/category?categoryName=Fastfood
-PATCH /items/reorder
-PATCH /items/{{itemId}}
-DELETE /items/{{itemId}}
-```
-
-Create item uses `multipart/form-data`:
-
-```txt
-name: Chicken kebab
-description: Master catalog item
-categoryName: Fastfood
-cuisineName: Bengali
-sortOrderId: 1
-itemImg: <file>
-```
-
-### 5. Tags
-
-```txt
-POST /tags/create
-GET /tags
-GET /tags/active
-GET /tags/{{tagId}}
-PATCH /tags/{{tagId}}
-PATCH /tags/{{tagId}}/active
-DELETE /tags/{{tagId}}
-POST /tags/items/{{itemId}}
-DELETE /tags/items/{{itemId}}/{{tagId}}
-POST /tags/combos/{{comboId}}
-DELETE /tags/combos/{{comboId}}/{{tagId}}
-```
-
-Create tag:
-
-```json
-{
-  "name": "Hot Selling",
-  "slug": "HOT_SELLING",
-  "active": true
-}
-```
-
-### 6. Shop Admin
-
-```txt
-PATCH /shops/start/{{shopId}}
-PATCH /shops/{{shopId}}/trial
-PATCH /shops/{{shopId}}/timings
-PATCH /shops/{{shopId}}/status
-PATCH /shops/{{shopId}}/settings
-DELETE /shops/revoke/{{shopId}}
-```
-
-Trial payload:
-
-```json
-{
-  "trialDays": 30
-}
-```
-
-### 7. Ads
-
-```txt
-POST /ads/create
-GET /ads/fetchAll
-GET /ads/fetchAll?placement={{adPlacement}}&shopId={{shopId}}
-GET /ads/fetchAll?everything=true
-GET /ads/seller?placement=SELLER_DASHBOARD
-GET /ads/buyer?placement=BUYER_EXPLORE&shopId={{shopId}}
-PATCH /ads/{{adId}}/active
-DELETE /ads/{{adId}}
-```
-
-Create ad uses `multipart/form-data`.
-
-Common fields:
-
-```txt
-name: Summer Campaign
-description: Promotion visible across ad slots
-placements: ["SELLER_DASHBOARD","BUYER_EXPLORE"]
-targetMode: ALL_SELLERS
-startsAt: 2026-06-10T09:00:00.000Z
-endsAt: 2026-06-30T21:00:00.000Z
-active: true
-```
-
-Image fields by placement:
-
-| Placement | File field |
-|---|---|
-| `SELLER_DASHBOARD` | `sellerDashboardImg` |
-| `SELLER_HOME` | `sellerHomeImg` |
-| `BUYER_EXPLORE` | `buyerExploreImg` |
-| `BUYER_SHOP_PAGE` | `buyerShopPageImg` |
-
-Seller dashboard ad fetch:
-
-```txt
-GET /ads/seller?placement=SELLER_DASHBOARD
-```
-
-Buyer explore/shop ad fetch:
-
-```txt
-GET /ads/buyer?placement=BUYER_EXPLORE
-GET /ads/buyer?placement=BUYER_SHOP_PAGE&shopId={{shopId}}
-```
-
-### 8. Buyer Side Ads
-
-```txt
-GET /ads/buyer-ads
-POST /ads/buyer-ads/admin
-GET /ads/buyer-ads/admin
-GET /ads/buyer-ads/admin/{{buyerAdId}}
-PATCH /ads/buyer-ads/admin/{{buyerAdId}}
-PATCH /ads/buyer-ads/admin/{{buyerAdId}}/active
-DELETE /ads/buyer-ads/admin/{{buyerAdId}}
-```
-
-Use these for buyer-targeted ads managed by admin.
-
-### 9. Revenue
-
-```txt
-GET /revenue/shop/{{shopId}}
-GET /revenue/shop/{{shopId}}/repeat-customers
-```
-
-Used by seller/admin dashboards for revenue summaries and repeat customer insights.
-
-### 10. Processed Orders
-
-```txt
-GET /orders/processed/all
-```
-
-Admin can view all completed orders.
-
-## Frontend Application Map
-
-### Seller App Screens
-
-Recommended flow:
-
-```txt
-Login
--> Seller profile
--> Create/edit shop
--> Set timings/status
--> Add shop items
--> Create combos
--> Create menus
--> Create offers
--> Manage active orders
--> Revenue dashboard
-```
-
-Main APIs:
-
-```txt
-/sellers/*
-/shops/*
-/items/custom
-/items/shop/:shopId
-/combos/*
-/menus/*
-/offers/*
-/orders/seller
-/revenue/shop/:shopId
-/ads/seller
-```
-
-### Buyer App Screens
-
-Recommended flow:
-
-```txt
-Login
--> Buyer profile/location
--> Nearby shops
--> Shop detail
--> Running menu
--> Cart
--> Available offers
--> Checkout
--> My orders
-```
-
-Main APIs:
-
-```txt
-/buyers/*
-/shops/nearby
-/shops/find/:shopId
-/shops/findshop/:slug
-/menus/shop/:shopId/running
-/offers/shop/:shopId/available
-/orders/checkout
-/orders/my
-/ads/buyer
-/ads/buyer-ads
-```
-
-### Admin App Screens
-
-Recommended flow:
-
-```txt
-Login
--> Users
--> Master cuisines/categories/items/tags
--> Shops
--> Ads
--> Offers support
--> Orders
--> Revenue
-```
-
-Main APIs:
-
-```txt
-/users/*
-/buyers/create/:userId
-/sellers/create/:userId
-/cuisines/*
-/categories/*
-/items/*
-/tags/*
-/shops/start/:shopId
-/shops/:shopId/trial
-/ads/*
-/orders/processed/all
-/revenue/shop/:shopId
-```
-
-## Common Frontend Gotchas
-
-1. Use `shopItemId`, not master `itemId`, when ordering, creating combos, creating menus, or targeting item offers.
-2. Item discount fields are removed. Use offers for discounts.
-3. Cart-level discount requires `applyTo: "ALL_CART"`.
-4. Running menus use server-local time unless `dayOfWeek` and `currentMinute` are passed.
-5. For file uploads, use `multipart/form-data`.
-6. Combo `finalPrice` may include combo-level discount.
-7. Checkout line item prices are stored as `priceAtOrderTime`.
-8. Completed order refund is automatic: `PATCH /orders/:orderId/refund` with `{}` refunds the remaining paid amount.
+| Method | Route | Access | Controller | Flow |
+|---|---|---|---|---|
+| `POST` | `/banners/create` | Admin or seller | `createBanner` | Creates a banner for one seller shop or multiple admin-selected shops with image/text/link/active data. |
+| `GET` | `/banners/shop/:shopId/published` | Authenticated | `fetchPublishedBannersByShop` | Returns active/published banners for buyer shop views. |
+| `GET` | `/banners/shop/:shopId/manage` | Admin or seller | `fetchShopBannersForManage` | Returns banners for management UI. |
+| `PATCH` | `/banners/:bannerId/publish` | Admin or seller | `updateBannerPublishStatus` | Publishes/unpublishes a banner. |
+| `PATCH` | `/banners/:bannerId` | Admin or seller | `updateBanner` | Updates banner text/link/image/active data. |
+| `DELETE` | `/banners/:bannerId` | Admin or seller | `deleteBanner` | Deletes a banner. |
+
+## Billing Flow
+
+All `/billing` routes require `verifyJWT`.
+
+Recharge creation rules:
+
+- Day-based recharge: send `dayOptionId`.
+- Fixed-amount recharge: send `amountOptionId`.
+- Do not send both.
+- Seller creates request only; wallet/slot credit happens after admin approval.
+
+| Method | Route | Access | Controller | Flow |
+|---|---|---|---|---|
+| `GET` | `/billing/config` | Authenticated | `getBillingConfig` | Returns billing settings, day recharge options, and amount recharge options. |
+| `PATCH` | `/billing/config` | Admin | `updateBillingConfig` | Updates daily slot price, commission percent, estimation buffer, and billing config values. |
+| `POST` | `/billing/day-options` | Admin | `createRechargeDayOption` | Creates a day-based recharge option. |
+| `DELETE` | `/billing/day-options/:optionId` | Admin | `deleteRechargeDayOption` | Deletes a day-based recharge option. |
+| `POST` | `/billing/amount-options` | Admin | `createRechargeAmountOption` | Creates a fixed-amount recharge option. |
+| `DELETE` | `/billing/amount-options/:optionId` | Admin | `deleteRechargeAmountOption` | Deletes a fixed-amount recharge option. |
+| `POST` | `/billing/recharges` | Seller | `createRechargeRequest` | Creates seller recharge request after checking shop access, requested slots, selected option, and payment transfer flag. |
+| `GET` | `/billing/recharges?status=PENDING&page=1&limit=20` | Admin | `listRechargeRequests` | Lists recharge requests, optionally filtered by status. |
+| `GET` | `/billing/recharges/my?shopId=&page=1&limit=20` | Seller | `listMyRechargeRequests` | Lists current seller recharge requests, optionally by shop. |
+| `PATCH` | `/billing/recharges/:rechargeId/review` | Admin | `reviewRechargeRequest` | Approves/rejects recharge. Approval credits wallet/slots and writes billing ledger data. |
+| `GET` | `/billing/shops/:shopId/summary?additionalSlots=0` | Seller owner or admin | `getShopBillingSummary` | Returns shop balance/slots/trial/recharge estimate summary. |
+| `GET` | `/billing/shops/:shopId/revenue` | Admin | `getShopRevenueOverview` | Returns billing revenue overview for one shop. |
+| `GET` | `/billing/shops/:shopId/ledger?page=1&limit=20` | Seller owner or admin | `getShopBillingLedger` | Returns shop billing ledger rows. |
+| `POST` | `/billing/shops/:shopId/sync-slots` | Admin | `syncShopSlots` | Recalculates/synchronizes shop slot state and optionally grants missing slots. |
+| `POST` | `/billing/settlements/run` | Admin | `runDailyBilling` | Runs daily billing settlement for supplied `date` or current date. |
+| `GET` | `/billing/company-revenue?page=1&limit=30&from=&to=` | Admin | `getCompanyRevenue` | Returns company revenue rows and pagination. |
+
+## Analytics Flow
+
+All `/analytics` routes require `verifyJWT` and admin access.
+
+| Method | Route | Access | Controller | Flow |
+|---|---|---|---|---|
+| `GET` | `/analytics/admin/summary` | Admin | `getAdminAnalyticsSummary` | Returns dashboard summary cards: sellers, buyers, orders, revenue, billing totals, repeat buyers. |
+| `GET` | `/analytics/admin/trends?days=14&start=&end=` | Admin | `getAdminAnalyticsTrends` | Returns order and revenue trends for a date window. |
+| `GET` | `/analytics/admin/top-shops?limit=10&sort=revenue` | Admin | `getAdminAnalyticsTopShops` | Returns top shops by completed revenue/orders depending on sort. |
+| `GET` | `/analytics/admin/top-buyers?limit=10` | Admin | `getAdminAnalyticsTopBuyers` | Returns top buyers by completed order activity/revenue. |
+| `GET` | `/analytics/admin/seller-wallet-monitor?page=1&limit=20&search=&lowBalanceOnly=false` | Admin | `getAdminSellerWalletMonitor` | Returns seller wallet, daily cost, days left, recharge status, and low-balance monitor rows. |
+
+## End-To-End Frontend Flows
+
+### Auth And Role Flow
+
+1. Call `/auth/generateOTP`.
+2. Call `/auth/verifyOTP`.
+3. Store `data.accessToken` into `accessToken`.
+4. Use the same header for all protected calls.
+5. Route access depends on the role in the token.
+
+### Admin Setup Flow
+
+1. Create or verify users via `/users`, `/buyers/create/:userId`, `/sellers/create/:userId`.
+2. Create shop types with `/shop-types`.
+3. Create cuisines, categories, and master items.
+4. Assign tags to master items/combos if needed.
+5. Verify/start shops with `/shops/start/:shopId`.
+6. Configure shop feature overrides with `/shop-types/shops/:shopId/features`.
+7. Configure billing with `/billing/config`, `/billing/day-options`, and `/billing/amount-options`.
+8. Monitor using `/analytics/admin/*`, `/users/admin/shops`, and `/orders/processed/all`.
+
+### Seller Inventory Flow
+
+1. Seller creates profile with `/sellers/create`.
+2. Seller creates shop with `/shops/create`.
+3. Seller sets timings/status/settings.
+4. Seller adds shop inventory with `/items/custom`.
+5. For fixed food items, send `pricing` and optional `variantGroups`.
+6. For vegetable/weighted items, send `pricingMode: MEASURED`, `unit`, `pricePerUnit`, `quantityStep`, and `availableQuantityValue`.
+7. Seller creates combos from `shopItemId`.
+8. Seller creates menus from `shopItemId` and `comboId`.
+9. Seller creates offers and banners.
+
+### Buyer Browse And Checkout Flow
+
+1. Buyer profile exists through `/buyers/create`.
+2. Browse nearby shops with `/shops/nearby`.
+3. Open shop with `/shops/find/:shopId` or `/shops/findshop/:slug`.
+4. Fetch running menus with `/menus/shop/:shopId/running`.
+5. Fetch available offers with `/offers/shop/:shopId/available`.
+6. Checkout with `/orders/checkout`.
+7. Track order with `/orders/my`, `/orders/:orderId/status`, `/orders/:orderId/timeline`, or `/orders/:orderId`.
+
+### Order Execution Flow
+
+1. Buyer calls `POST /orders/checkout`, order starts as `NEW`.
+2. Seller sees it in `GET /orders/seller`.
+3. Seller can mark payment received if needed.
+4. Seller confirms order with `PATCH /orders/:orderId/confirm`, inventory is decremented.
+5. Seller marks ready with `PATCH /orders/:orderId/ready`.
+6. Seller completes with `PATCH /orders/:orderId/complete`, revenue and commission records are written.
+7. Admin sees completed order in `GET /orders/processed/all`.
+
+### Billing Recharge Flow
+
+1. Admin creates recharge options.
+2. Seller checks `/billing/config` and `/billing/shops/:shopId/summary`.
+3. Seller creates `/billing/recharges` with `dayOptionId` or `amountOptionId`.
+4. Admin lists `/billing/recharges`.
+5. Admin reviews `/billing/recharges/:rechargeId/review`.
+6. Seller/admin reads `/billing/shops/:shopId/ledger`.
+
+## Coverage Note
+
+This guide intentionally lists active mounted routes only. Commented-out routes
+in route files, older recharge code inside `shop.controller.js`, and Postman
+example-only convenience requests are not active API surfaces.

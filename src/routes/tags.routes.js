@@ -12,14 +12,14 @@ import {
     updateTag,
     updateTagActiveStatus,
 } from "../controllers/tags/tags.controller.js";
-import { isAdmin } from "../middleware/admin.middleware.js";
+import { isAdmin, isAdminOrSeller } from "../middleware/admin.middleware.js";
 import { verifyJWT } from "../middleware/auth.middleware.js";
 
 export const tagRouter = Router();
 
 tagRouter.use(verifyJWT);
 
-tagRouter.route("/").get(fetchAllTags);
+tagRouter.route("/allTags").get(isAdminOrSeller, fetchAllTags);
 tagRouter.route("/active").get(fetchActiveTags);
 tagRouter.route("/create").post(isAdmin, createTag);
 tagRouter.route("/items/:itemId").post(isAdmin, assignTagsToItem);

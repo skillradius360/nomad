@@ -8,3 +8,5 @@ FRONTEND_API_GUIDE.
 .agents
 server.err.log
 server.out.log
+FRONTEND_CURSOR_CONTEXT.txt
+docker-compose.yml

@@ -54,6 +54,7 @@ const isAdmin = hasRole("ADMIN", "Admin access required");
 const isSeller = hasRole("SELLER", "Seller access required");
 const isBuyer = hasRole("BUYER", "Buyer access required");
 const isAdminOrSeller = hasAnyRole(["ADMIN", "SELLER"], "Admin or seller access required");
+const isAdminOrBuyer = hasAnyRole(["ADMIN", "BUYER"], "Admin or buyer access required");
 
 
 // ***************************************************************************
@@ -80,4 +81,4 @@ const isSelfOrAdmin = asyncHandler(async (req, res, next) => {
     throw new apiError(403, "You can only manage your own account");
 });
 
-export { isAdmin, isAdminOrSeller, isBuyer, isSeller, isSelfOrAdmin };
+export { isAdmin, isAdminOrBuyer, isAdminOrSeller, isBuyer, isSeller, isSelfOrAdmin };

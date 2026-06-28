@@ -3,6 +3,13 @@ import { asyncHandler, apiError, apiResponse } from "../../utils/handler.js";
 import { buildPaginationMeta, getPagination } from "../../utils/pagination.js";
 import { randomUUID } from "node:crypto";
 import { calculateBpsAmount, getBillingSettings } from "../../utils/billing.js";
+import {
+    getShopItemPricingMode,
+    normalizeMeasuredQuantity,
+    parseVariantOptionIds,
+    resolveSelectedItemVariants,
+    shopItemVariantSelect
+} from "../../utils/shopItemVariants.js";
 
 const VALID_PAYMENT_METHODS = ["CASH","CARD","UPI"];
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -36,12 +43,17 @@ const orderInventoryInclude = {
             comboId:true,
             name:true,
             quantity:true,
+            quantityValue:true,
             priceAtOrderTime:true,
             totalPrice:true,
+            variantSnapshot:true,
+            measurementSnapshot:true,
             shopItem:{
                 select:{
                     id:true,
                     availableQuantity:true,
+                    pricingMode:true,
+                    availableQuantityValue:true,
                     item:{
                         select:{
                             id:true,
@@ -62,6 +74,8 @@ const orderInventoryInclude = {
                                 select:{
                                     id:true,
                                     availableQuantity:true,
+                                    pricingMode:true,
+                                    availableQuantityValue:true,
                                     item:{
                                         select:{
                                             id:true,
@@ -85,8 +99,11 @@ const orderItemSelect = {
     comboId:true,
     name:true,
     quantity:true,
+    quantityValue:true,
     priceAtOrderTime:true,
-    totalPrice:true
+    totalPrice:true,
+    variantSnapshot:true,
+    measurementSnapshot:true
 };
 
 const orderListSelect = {
@@ -119,7 +136,8 @@ const sellerOrderListSelect = {
         select:{
             id:true,
             name:true,
-            phone:true
+            phone:true,
+            email:true
         }
     }
 };
@@ -212,6 +230,7 @@ const applyRevenueDeltas = async(tx,rows)=>{
 const addInventoryUsage = (usageMap, inventoryItem, quantity, name)=>{
     if(!inventoryItem?.id) return;
 
+    const pricingMode = getShopItemPricingMode(inventoryItem);
     const existingUsage = usageMap.get(inventoryItem.id);
     if(existingUsage){
         existingUsage.quantity += quantity;
@@ -222,7 +241,8 @@ const addInventoryUsage = (usageMap, inventoryItem, quantity, name)=>{
         id:inventoryItem.id,
         name,
         quantity,
-        availableQuantity:inventoryItem.availableQuantity
+        pricingMode,
+        availableQuantity:pricingMode === "MEASURED" ? inventoryItem.availableQuantityValue : inventoryItem.availableQuantity
     });
 };
 
@@ -244,7 +264,9 @@ const getOrderInventoryUsage = (order)=>{
             addInventoryUsage(
                 shopItemUsage,
                 orderItem.shopItem,
-                orderItem.quantity,
+                getShopItemPricingMode(orderItem.shopItem) === "MEASURED"
+                    ? Number(orderItem.quantityValue || orderItem.quantity)
+                    : orderItem.quantity,
                 orderItem.shopItem?.item?.name || orderItem.name || "item"
             );
             return;
@@ -276,7 +298,8 @@ const formatOrderListItem = (order)=>({
         buyer:{
             id:order.user.id,
             name:order.user.name,
-            phone:order.user.phone
+            phone:order.user.phone,
+            email:order.user.email
         }
     } : {}),
     shopId:order.shopId,
@@ -299,10 +322,107 @@ const formatOrderListItem = (order)=>({
         comboId:item.comboId,
         name:item.name,
         quantity:item.quantity,
+        quantityValue:item.quantityValue,
         price:item.priceAtOrderTime,
-        totalPrice:item.totalPrice
+        totalPrice:item.totalPrice,
+        variants:item.variantSnapshot || [],
+        measurement:item.measurementSnapshot || null
     })) || []
 });
+
+const orderDetailSelect = {
+    id:true,
+    shopId:true,
+    userId:true,
+    currentOrderStatus:true,
+    paymentMethod:true,
+    paymentReceived:true,
+    subtotalAmount:true,
+    discountAmount:true,
+    deliveryAmount:true,
+    deliveryDiscountAmount:true,
+    totalAmount:true,
+    paidAmount:true,
+    refundAmount:true,
+    customerNote:true,
+    completedAt:true,
+    cancelledAt:true,
+    refundedAt:true,
+    createdAt:true,
+    updatedAt:true,
+    user:{
+        select:{
+            id:true,
+            name:true,
+            phone:true,
+            email:true
+        }
+    },
+    shop:{
+        select:{
+            id:true,
+            shopName:true,
+            ownerId:true,
+            shopImage:true,
+            Address:true,
+            slug:true
+        }
+    },
+    orderItems:{
+        select:orderItemSelect
+    },
+    commissionCharge:{
+        select:{
+            orderValue:true,
+            commissionBps:true,
+            commissionAmount:true,
+            refundedCommission:true,
+            pendingAdjustment:true,
+            status:true,
+            completedAt:true,
+            settledAt:true
+        }
+    },
+    completedOffer:{
+        select:{
+            id:true,
+            totalAmount:true,
+            completedAt:true,
+            createdAt:true
+        }
+    }
+};
+
+const requireOrderAccess = async(orderId,currentUser)=>{
+    requireValidOrderId(orderId);
+    const order = await prisma.order.findUnique({
+        where:{id:orderId},
+        select:orderDetailSelect
+    });
+
+    if(!order) throw new apiError(404,"order not found");
+    if(currentUser.role === "BUYER" && order.userId !== currentUser.id){
+        throw new apiError(403,"You can only view your own orders");
+    }
+    if(currentUser.role === "SELLER" && order.shop?.ownerId !== currentUser.id){
+        throw new apiError(403,"You can only view orders for your own shop");
+    }
+    if(!["ADMIN","SELLER","BUYER"].includes(currentUser.role)){
+        throw new apiError(403,"order access denied");
+    }
+
+    return order;
+};
+
+const buildOrderTimeline = (order)=>[
+    {status:"NEW",label:"Order placed",at:order.createdAt,done:Boolean(order.createdAt)},
+    {status:"PAYMENT_RECEIVED",label:"Payment received",at:order.paymentReceived ? order.updatedAt : null,done:order.paymentReceived},
+    {status:"PREPARING",label:"Seller confirmed",at:null,done:["PREPARING","READY","DONE"].includes(order.currentOrderStatus)},
+    {status:"READY",label:"Order ready",at:null,done:["READY","DONE"].includes(order.currentOrderStatus)},
+    {status:"DONE",label:"Order completed",at:order.completedAt,done:order.currentOrderStatus === "DONE"},
+    {status:"CANCELLED",label:"Order cancelled",at:order.cancelledAt,done:order.currentOrderStatus === "CANCELLED"},
+    {status:"REFUNDED",label:"Refund recorded",at:order.refundedAt,done:Boolean(order.refundedAt)}
+];
 
 const createOrder = asyncHandler(async(req,res)=>{
     const {
@@ -342,7 +462,9 @@ const createOrder = asyncHandler(async(req,res)=>{
 
             return {
                 shopItemId:item.shopItemId || item.itemId || item.id,
-                quantity:item.quantity === undefined || item.quantity === null ? 1 : Number(item.quantity)
+                quantity:item.quantity === undefined || item.quantity === null ? 1 : Number(item.quantity),
+                quantityValue:item.quantityValue ?? item.weight ?? item.measurementQuantity,
+                variantOptionIds:parseVariantOptionIds(item.variantOptionIds ?? item.variantOptions ?? item.options)
             };
         })
         : [];
@@ -375,7 +497,7 @@ const createOrder = asyncHandler(async(req,res)=>{
         throw new apiError(400,"each order combo needs a comboId");
     }
 
-    if(normalizedItems.some((item)=>!Number.isInteger(item.quantity) || item.quantity < 1)){
+    if(normalizedItems.some((item)=>item.quantityValue === undefined && (!Number.isInteger(item.quantity) || item.quantity < 1))){
         throw new apiError(400,"item quantity must be a positive integer");
     }
 
@@ -386,8 +508,13 @@ const createOrder = asyncHandler(async(req,res)=>{
     const uniqueShopItemIds = [...new Set(normalizedItems.map((item)=>String(item.shopItemId)))];
     const uniqueComboIds = [...new Set(normalizedCombos.map((combo)=>String(combo.comboId)))];
 
-    if(uniqueShopItemIds.length !== normalizedItems.length){
-        throw new apiError(400,"duplicate order items are not allowed");
+    const uniqueItemSelectionKeys = [...new Set(normalizedItems.map((item)=>{
+        const optionKey = [...item.variantOptionIds].sort().join(",");
+        return `${item.shopItemId}:${optionKey}:${item.quantityValue ?? ""}`;
+    }))];
+
+    if(uniqueItemSelectionKeys.length !== normalizedItems.length){
+        throw new apiError(400,"duplicate order items with the same variants are not allowed");
     }
 
     if(uniqueComboIds.length !== normalizedCombos.length){
@@ -444,7 +571,8 @@ const createOrder = asyncHandler(async(req,res)=>{
                 ownerId:true,
                 ShopOpenStatus:true,
                 Verified:true,
-                billingStatus:true
+                billingStatus:true,
+                deliveryEnabled:true
             }
         }),
         uniqueShopItemIds.length > 0
@@ -460,11 +588,23 @@ const createOrder = asyncHandler(async(req,res)=>{
                     id:true,
                     pricing:true,
                     availableQuantity:true,
+                    pricingMode:true,
+                    unit:true,
+                    displayUnit:true,
+                    pricePerUnit:true,
+                    minOrderQuantity:true,
+                    quantityStep:true,
+                    availableQuantityValue:true,
                     item:{
                         select:{
                             id:true,
                             name:true
                         }
+                    },
+                    variantGroups:{
+                        where:{active:true},
+                        orderBy:{sortOrder:"asc"},
+                        select:shopItemVariantSelect
                     }
                 }
             })
@@ -490,6 +630,8 @@ const createOrder = asyncHandler(async(req,res)=>{
                                 select:{
                                     id:true,
                                     availableQuantity:true,
+                                    pricingMode:true,
+                                    availableQuantityValue:true,
                                     item:{
                                         select:{
                                             name:true
@@ -591,21 +733,65 @@ const createOrder = asyncHandler(async(req,res)=>{
             return;
         }
 
+        const pricingMode = getShopItemPricingMode(shopItem);
         shopItemQuantityUsage.set(shopItem.id,{
             id:shopItem.id,
             name:shopItem.item?.name || "item",
-            availableQuantity:shopItem.availableQuantity,
+            availableQuantity:pricingMode === "MEASURED" ? shopItem.availableQuantityValue : shopItem.availableQuantity,
             quantity
         });
     };
 
     normalizedItems.forEach((selectedItem)=>{
         const shopItem = shopItemsById.get(String(selectedItem.shopItemId));
-        const itemPrice = Number(shopItem.pricing);
+        const pricingMode = getShopItemPricingMode(shopItem);
 
-        if(!Number.isInteger(itemPrice) || itemPrice < 0){
+        if(pricingMode === "MEASURED"){
+            if(selectedItem.variantOptionIds.length > 0){
+                throw new apiError(400,`${shopItem.item.name} does not support variants for measured pricing`);
+            }
+
+            const quantityValue = normalizeMeasuredQuantity(
+                shopItem,
+                selectedItem.quantityValue ?? selectedItem.quantity
+            );
+            const pricePerUnit = Number(shopItem.pricePerUnit);
+            if(!Number.isFinite(pricePerUnit) || pricePerUnit < 0){
+                throw new apiError(400,`${shopItem.item.name} has invalid pricePerUnit`);
+            }
+
+            const itemTotalPrice = Math.round(pricePerUnit * quantityValue);
+            addShopItemQuantityUsage(shopItem,quantityValue);
+
+            orderItemsToCreate.push({
+                orderItemType:"ITEM",
+                shopItemId:shopItem.id,
+                name:shopItem.item.name,
+                quantity:1,
+                quantityValue,
+                priceAtOrderTime:itemTotalPrice,
+                totalPrice:itemTotalPrice,
+                variantSnapshot:[],
+                measurementSnapshot:{
+                    pricingMode,
+                    unit:shopItem.unit,
+                    displayUnit:shopItem.displayUnit,
+                    pricePerUnit,
+                    quantityValue,
+                    minOrderQuantity:shopItem.minOrderQuantity,
+                    quantityStep:shopItem.quantityStep
+                }
+            });
+            return;
+        }
+
+        const baseItemPrice = Number(shopItem.pricing);
+        if(!Number.isInteger(baseItemPrice) || baseItemPrice < 0){
             throw new apiError(400,`${shopItem.item.name} has invalid pricing`);
         }
+        const selectedVariants = resolveSelectedItemVariants(shopItem,selectedItem.variantOptionIds);
+        const variantAmount = selectedVariants.reduce((sum,variant)=>sum + Number(variant.amount || 0),0);
+        const itemPrice = baseItemPrice + variantAmount;
 
         addShopItemQuantityUsage(shopItem,selectedItem.quantity);
 
@@ -615,7 +801,8 @@ const createOrder = asyncHandler(async(req,res)=>{
             name:shopItem.item.name,
             quantity:selectedItem.quantity,
             priceAtOrderTime:itemPrice,
-            totalPrice:itemPrice * selectedItem.quantity
+            totalPrice:itemPrice * selectedItem.quantity,
+            variantSnapshot:selectedVariants
         });
     });
 
@@ -657,19 +844,26 @@ const createOrder = asyncHandler(async(req,res)=>{
     if(!Number.isInteger(normalizedDeliveryAmount) || normalizedDeliveryAmount < 0){
         throw new apiError(400,"deliveryAmount must be a valid number");
     }
+    if(shop.deliveryEnabled === false && normalizedDeliveryAmount > 0){
+        throw new apiError(400,"delivery is currently disabled for this shop");
+    }
 
     const selectedItemQuantityById = new Map();
     const selectedComboQuantityById = new Map();
     const selectedItemTotalById = new Map();
     const selectedComboTotalById = new Map();
-    const selectedItemUnitPriceById = new Map();
+    const selectedItemUnitPricesById = new Map();
     const selectedComboUnitPriceById = new Map();
 
     orderItemsToCreate.forEach((orderItem)=>{
         if(orderItem.orderItemType === "ITEM"){
             selectedItemQuantityById.set(orderItem.shopItemId,(selectedItemQuantityById.get(orderItem.shopItemId) || 0) + orderItem.quantity);
             selectedItemTotalById.set(orderItem.shopItemId,(selectedItemTotalById.get(orderItem.shopItemId) || 0) + orderItem.totalPrice);
-            selectedItemUnitPriceById.set(orderItem.shopItemId,orderItem.priceAtOrderTime);
+            const existingUnitPrices = selectedItemUnitPricesById.get(orderItem.shopItemId) || [];
+            for(let index = 0; index < orderItem.quantity; index += 1){
+                existingUnitPrices.push(orderItem.priceAtOrderTime);
+            }
+            selectedItemUnitPricesById.set(orderItem.shopItemId,existingUnitPrices);
             return;
         }
 
@@ -779,9 +973,7 @@ const createOrder = asyncHandler(async(req,res)=>{
 
                 const rewardUnitPrices = [];
                 rewardItemIds.forEach((shopItemId)=>{
-                    const quantity = selectedItemQuantityById.get(shopItemId) || 0;
-                    const unitPrice = selectedItemUnitPriceById.get(shopItemId) || 0;
-                    for(let index = 0; index < quantity; index += 1) rewardUnitPrices.push(unitPrice);
+                    rewardUnitPrices.push(...(selectedItemUnitPricesById.get(shopItemId) || []));
                 });
                 rewardComboIds.forEach((comboId)=>{
                     const quantity = selectedComboQuantityById.get(comboId) || 0;
@@ -868,12 +1060,100 @@ const createOrder = asyncHandler(async(req,res)=>{
                 itemId:item.shopItemId || item.comboId,
                 name:item.name,
                 quantity:item.quantity,
+                quantityValue:item.quantityValue,
                 price:item.priceAtOrderTime,
-                totalPrice:item.totalPrice
+                totalPrice:item.totalPrice,
+                variants:item.variantSnapshot || [],
+                measurement:item.measurementSnapshot || null
             }
         )),
         appliedOffers
     },"order created successfully"));
+});
+
+const getOrderDetails = asyncHandler(async(req,res)=>{
+    const currentUser = await prisma.user.findUnique({
+        where:{id:req.userData?.id},
+        select:{id:true,role:true,isBlocked:true}
+    });
+    if(!currentUser || currentUser.isBlocked) throw new apiError(401,"User blocked or unauthorized");
+
+    const order = await requireOrderAccess(req.params.orderId,currentUser);
+    return res.status(200).json(new apiResponse(200,{
+        ...formatOrderListItem(order),
+        buyer:order.user,
+        shop:order.shop ? {
+            id:order.shop.id,
+            shopName:order.shop.shopName,
+            shopImage:order.shop.shopImage,
+            address:order.shop.Address,
+            slug:order.shop.slug
+        } : null,
+        paidAmount:order.paidAmount,
+        refundAmount:order.refundAmount,
+        completedAt:order.completedAt,
+        cancelledAt:order.cancelledAt,
+        refundedAt:order.refundedAt,
+        updatedAt:order.updatedAt,
+        completedOrderRecord:order.completedOffer ? {
+            id:order.completedOffer.id,
+            totalAmount:order.completedOffer.totalAmount,
+            completedAt:order.completedOffer.completedAt
+        } : null,
+        commission:order.commissionCharge || null
+    },"order details fetched successfully"));
+});
+
+const getOrderTimeline = asyncHandler(async(req,res)=>{
+    const currentUser = await prisma.user.findUnique({
+        where:{id:req.userData?.id},
+        select:{id:true,role:true,isBlocked:true}
+    });
+    if(!currentUser || currentUser.isBlocked) throw new apiError(401,"User blocked or unauthorized");
+
+    const order = await requireOrderAccess(req.params.orderId,currentUser);
+    return res.status(200).json(new apiResponse(200,{
+        id:order.id,
+        currentOrderStatus:order.currentOrderStatus,
+        timeline:buildOrderTimeline(order)
+    },"order timeline fetched successfully"));
+});
+
+const getOrderInvoice = asyncHandler(async(req,res)=>{
+    const currentUser = await prisma.user.findUnique({
+        where:{id:req.userData?.id},
+        select:{id:true,role:true,isBlocked:true}
+    });
+    if(!currentUser || currentUser.isBlocked) throw new apiError(401,"User blocked or unauthorized");
+
+    const order = await requireOrderAccess(req.params.orderId,currentUser);
+    return res.status(200).json(new apiResponse(200,{
+        invoiceNo:`INV-${order.id.slice(0,8).toUpperCase()}`,
+        issuedAt:new Date(),
+        orderId:order.id,
+        buyer:order.user,
+        shop:order.shop ? {
+            id:order.shop.id,
+            shopName:order.shop.shopName,
+            address:order.shop.Address,
+            slug:order.shop.slug
+        } : null,
+        items:formatOrderListItem(order).items,
+        totals:{
+            subtotalAmount:order.subtotalAmount,
+            discountAmount:order.discountAmount,
+            deliveryAmount:order.deliveryAmount,
+            deliveryDiscountAmount:order.deliveryDiscountAmount,
+            totalAmount:order.totalAmount,
+            paidAmount:order.paidAmount,
+            refundAmount:order.refundAmount
+        },
+        payment:{
+            method:order.paymentMethod,
+            received:order.paymentReceived
+        },
+        status:order.currentOrderStatus
+    },"order invoice fetched successfully"));
 });
 
 const getMyOrders = asyncHandler(async(req,res)=>{
@@ -1083,9 +1363,19 @@ const getOrderCurrentStatus = asyncHandler(async(req,res)=>{
 
 const getAllProcessedOrders = asyncHandler(async(req,res)=>{
     const pagination = getPagination(req.query);
+    const search = typeof req.query.search === "string" ? req.query.search.trim() : "";
     const where = {
         currentOrderStatus:"DONE"
     };
+
+    if(search){
+        where.OR = [
+            {id:{contains:search,mode:"insensitive"}},
+            {user:{name:{contains:search,mode:"insensitive"}}},
+            {user:{phone:{contains:search,mode:"insensitive"}}},
+            {user:{email:{contains:search,mode:"insensitive"}}}
+        ];
+    }
 
     const [currentUser,orders,total] = await Promise.all([
         prisma.user.findUnique({
@@ -1119,6 +1409,9 @@ const getAllProcessedOrders = asyncHandler(async(req,res)=>{
             limit:pagination.limit,
             total
         }),
+        filters:{
+            search:search || null
+        },
         orders:orders.map(formatOrderListItem)
     },"all processed orders fetched successfully"));
 });
@@ -1224,14 +1517,15 @@ const confirmOrder = asyncHandler(async(req,res)=>{
     if(order.currentOrderStatus !== "NEW") throw new apiError(400,"only new orders can be confirmed");
 
     const {shopItemUsage,comboUsage} = getOrderInventoryUsage(order);
-    const finiteShopItemUsage = shopItemUsage.filter((usage)=>usage.availableQuantity !== null);
+    const finiteFixedShopItemUsage = shopItemUsage.filter((usage)=>usage.pricingMode !== "MEASURED" && usage.availableQuantity !== null);
+    const finiteMeasuredShopItemUsage = shopItemUsage.filter((usage)=>usage.pricingMode === "MEASURED" && usage.availableQuantity !== null);
     const finiteComboUsage = comboUsage.filter((usage)=>usage.availableQuantity !== null);
 
     const updatedOrder = await prisma.$transaction(async(tx)=>{
         const [inventoryResult] = await tx.$queryRaw`
             WITH shop_item_usage AS (
                 SELECT *
-                FROM jsonb_to_recordset(${serializeInventoryUsage(finiteShopItemUsage)}::jsonb)
+                FROM jsonb_to_recordset(${serializeInventoryUsage(finiteFixedShopItemUsage)}::jsonb)
                     AS usage("id" text,"quantity" integer)
             ),
             combo_usage AS (
@@ -1266,11 +1560,30 @@ const confirmOrder = asyncHandler(async(req,res)=>{
 
         const updatedShopItemIds = new Set(inventoryResult.shopItemIds);
         const updatedComboIds = new Set(inventoryResult.comboIds);
-        const unavailableShopItem = finiteShopItemUsage.find((usage)=>!updatedShopItemIds.has(usage.id));
+        const unavailableShopItem = finiteFixedShopItemUsage.find((usage)=>!updatedShopItemIds.has(usage.id));
         const unavailableCombo = finiteComboUsage.find((usage)=>!updatedComboIds.has(usage.id));
 
         if(unavailableShopItem) throw new apiError(400,`${unavailableShopItem.name} does not have enough quantity`);
         if(unavailableCombo) throw new apiError(400,`${unavailableCombo.name} does not have enough quantity`);
+
+        for(const usage of finiteMeasuredShopItemUsage){
+            const updatedMeasuredItem = await tx.shopItem.updateMany({
+                where:{
+                    id:usage.id,
+                    availableQuantityValue:{
+                        gte:usage.quantity
+                    }
+                },
+                data:{
+                    availableQuantityValue:{
+                        decrement:usage.quantity
+                    }
+                }
+            });
+            if(updatedMeasuredItem.count === 0){
+                throw new apiError(400,`${usage.name} does not have enough quantity`);
+            }
+        }
 
         return tx.order.update({
             where:{
@@ -1526,10 +1839,13 @@ const cancelOrder = asyncHandler(async(req,res)=>{
 
     const updatedOrder = await prisma.$transaction(async(tx)=>{
         if(shouldRestoreInventory){
+            const fixedShopItemUsage = shopItemUsage.filter((usage)=>usage.pricingMode !== "MEASURED");
+            const measuredShopItemUsage = shopItemUsage.filter((usage)=>usage.pricingMode === "MEASURED");
+
             await tx.$queryRaw`
                 WITH shop_item_usage AS (
                     SELECT *
-                    FROM jsonb_to_recordset(${serializeInventoryUsage(shopItemUsage)}::jsonb)
+                    FROM jsonb_to_recordset(${serializeInventoryUsage(fixedShopItemUsage)}::jsonb)
                         AS usage("id" text,"quantity" integer)
                 ),
                 combo_usage AS (
@@ -1561,6 +1877,22 @@ const cancelOrder = asyncHandler(async(req,res)=>{
                     (SELECT count(*) FROM restored_shop_items) AS "shopItemCount",
                     (SELECT count(*) FROM restored_combos) AS "comboCount"
             `;
+
+            for(const usage of measuredShopItemUsage){
+                await tx.shopItem.updateMany({
+                    where:{
+                        id:usage.id,
+                        availableQuantityValue:{
+                            not:null
+                        }
+                    },
+                    data:{
+                        availableQuantityValue:{
+                            increment:usage.quantity
+                        }
+                    }
+                });
+            }
         }
 
         const cancelledOrder = await tx.order.update({
@@ -1714,6 +2046,9 @@ export {
     getMyOrders,
     getSellerOrders,
     getSellerProcessedOrders,
+    getOrderDetails,
+    getOrderTimeline,
+    getOrderInvoice,
     getOrderCurrentStatus,
     getAllProcessedOrders,
     markPaymentReceived,

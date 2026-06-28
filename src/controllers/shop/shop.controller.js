@@ -1,8 +1,16 @@
 import { prisma } from "../../db/index.js";
 import { apiError, apiResponse, asyncHandler } from "../../utils/handler.js";
 import { cloudUploader } from "../../utils/cloudinary.upload.js";
-import { getCachedData, setCachedData } from "../../utils/cache.js";
+import { deleteCacheByPattern, getCachedData, setCachedData } from "../../utils/cache.js";
 import { buildPaginationMeta, getPagination } from "../../utils/pagination.js";
+import { getEffectiveShopFeatures, normalizeShopFeature, normalizeShopFeatures } from "../../utils/shopFeatures.js";
+import {
+    calculateShopItemLowestPrice,
+    formatShopItemVariantGroups,
+    formatShopItemPricing,
+    hasShopItemVariants,
+    shopItemVariantSelect
+} from "../../utils/shopItemVariants.js";
 
 const parseRechargeAmount = (amount) => {
     const parsedAmount = Number(amount);
@@ -29,6 +37,81 @@ const parseOptionalCoordinate = (value, fieldName) => {
 };
 
 const isTruthyQuery = (value) => ["true", "1", "yes", "on"].includes(String(value).trim().toLowerCase());
+
+const parseOptionalBoolean = (value, fieldName) => {
+    if(value === undefined) return undefined;
+    if(typeof value === "boolean") return value;
+    if(value === null || value === "") return null;
+
+    const normalizedValue = String(value).trim().toLowerCase();
+    if(["true","1","yes","on"].includes(normalizedValue)) return true;
+    if(["false","0","no","off"].includes(normalizedValue)) return false;
+
+    throw new apiError(400,`${fieldName} must be true or false`);
+};
+
+const parseJsonMaybe = (value, fieldName)=>{
+    if(typeof value !== "string") return value;
+    const trimmedValue = value.trim();
+    if(!trimmedValue) return value;
+    if(!trimmedValue.startsWith("[") && !trimmedValue.startsWith("{")) return value;
+
+    try{
+        return JSON.parse(trimmedValue);
+    }catch{
+        throw new apiError(400,`${fieldName} must be valid JSON`);
+    }
+};
+
+const parseFeatureListInput = (value)=>{
+    const parsedValue = parseJsonMaybe(value,"features");
+    if(Array.isArray(parsedValue)) return parsedValue;
+    if(parsedValue === undefined || parsedValue === null || parsedValue === "") return [];
+    return String(parsedValue)
+        .split(",")
+        .map((feature)=>feature.trim())
+        .filter(Boolean);
+};
+
+const buildShopFeatureOverrideInputs = ({feature,features,featureEnabled,enabled,featureOverrides,overrides})=>{
+    const rawOverrides = featureOverrides ?? overrides;
+    if(rawOverrides !== undefined){
+        const parsedOverrides = parseJsonMaybe(rawOverrides,"featureOverrides");
+        if(!Array.isArray(parsedOverrides)){
+            throw new apiError(400,"featureOverrides must be an array");
+        }
+
+        return parsedOverrides.map((override)=>({
+            feature:normalizeShopFeature(override.feature),
+            enabled:Boolean(parseOptionalBoolean(override.enabled,"featureOverrides.enabled") ?? true)
+        }));
+    }
+
+    const selectedFeatures = parseFeatureListInput(features);
+    if(feature !== undefined){
+        selectedFeatures.push(...parseFeatureListInput(feature));
+    }
+
+    if(selectedFeatures.length === 0) return [];
+
+    const normalizedFeatures = normalizeShopFeatures(selectedFeatures);
+    const overrideEnabled = parseOptionalBoolean(featureEnabled ?? enabled,"featureEnabled") ?? true;
+    return normalizedFeatures.map((normalizedFeature)=>({
+        feature:normalizedFeature,
+        enabled:overrideEnabled
+    }));
+};
+
+const invalidateShopCaches = async(shop)=>{
+    await Promise.all([
+        deleteCacheByPattern(`catalog:shop:${shop.id}:*`),
+        deleteCacheByPattern(`buyer:shop:full:${shop.id}`),
+        deleteCacheByPattern(`buyer:shop:full:*:${shop.id}`),
+        deleteCacheByPattern(`buyer:shop:${shop.id}:*`),
+        shop.slug ? deleteCacheByPattern(`buyer:shop:slug:${shop.slug}`) : Promise.resolve(),
+        shop.slug ? deleteCacheByPattern(`buyer:shop:slug:*:${shop.slug}`) : Promise.resolve()
+    ]);
+};
 
 const MILLISECONDS_IN_DAY = 24 * 60 * 60 * 1000;
 
@@ -65,7 +148,11 @@ const formatShopBrowseItem = (shopItem)=>({
     itemId:shopItem.item?.id,
     name:shopItem.item?.name,
     pricing:shopItem.pricing,
-    finalPrice:Math.max(0,Math.round(Number(shopItem.pricing))),
+    ...formatShopItemPricing(shopItem),
+    lowestPrice:calculateShopItemLowestPrice(shopItem),
+    finalPrice:calculateShopItemLowestPrice(shopItem),
+    hasVariants:hasShopItemVariants(shopItem),
+    variantGroups:formatShopItemVariantGroups(shopItem.variantGroups),
     availableQuantity:shopItem.availableQuantity,
     imageUrl:shopItem.imageUrl || shopItem.item?.imageUrl || null,
     description:shopItem.description,
@@ -96,7 +183,11 @@ const formatShopBrowseCombo = (combo)=>({
         name:comboItem.item?.item?.name,
         quantity:comboItem.quantity,
         pricing:comboItem.item?.pricing,
-        finalPrice:Math.max(0,Math.round(Number(comboItem.item?.pricing))),
+        ...formatShopItemPricing(comboItem.item),
+        lowestPrice:calculateShopItemLowestPrice(comboItem.item),
+        finalPrice:calculateShopItemLowestPrice(comboItem.item),
+        hasVariants:hasShopItemVariants(comboItem.item),
+        variantGroups:formatShopItemVariantGroups(comboItem.item?.variantGroups),
         imageUrl:comboItem.item?.imageUrl || comboItem.item?.item?.imageUrl || null,
         description:comboItem.item?.description,
         categoryId:comboItem.item?.item?.categoryId || null
@@ -130,6 +221,7 @@ const formatFullShopData = (shop)=>{
         verified:shop.Verified,
         shopType:shop.shopType,
         delivery:{
+            enabled:shop.deliveryEnabled,
             minimumRate:shop.MinimumDeliveryRate,
             freeRate:shop.FreeDeliveryRate
         },
@@ -143,8 +235,25 @@ const formatFullShopData = (shop)=>{
         isOpenNow:openState.isOpenNow,
         todayTiming:openState.todayTiming,
         timings:shop.timings,
-        items:shop.items,
-        combos:shop.combos
+        items:shop.items?.map((item)=>({
+            ...item,
+            ...formatShopItemPricing(item),
+            lowestPrice:calculateShopItemLowestPrice(item),
+            finalPrice:calculateShopItemLowestPrice(item),
+            hasVariants:hasShopItemVariants(item),
+            variantGroups:formatShopItemVariantGroups(item.variantGroups)
+        })) || [],
+        combos:shop.combos?.map((combo)=>({
+            ...combo,
+            items:combo.items?.map((item)=>({
+                ...item,
+                ...formatShopItemPricing(item),
+                lowestPrice:calculateShopItemLowestPrice(item),
+                finalPrice:calculateShopItemLowestPrice(item),
+                hasVariants:hasShopItemVariants(item),
+                variantGroups:formatShopItemVariantGroups(item.variantGroups)
+            })) || []
+        })) || []
     };
 };
 
@@ -300,6 +409,7 @@ const createShop = asyncHandler(async(req,res)=>{
         ShopOpenStatus:true,
         status:true,
         Verified:true,
+        deliveryEnabled:true,
         shopType:{
             select:{
                 id:true,
@@ -328,6 +438,7 @@ const createShop = asyncHandler(async(req,res)=>{
         slug:shopData.slug,
         verified:shopData.Verified,
         status:shopData.status,
+        deliveryEnabled:shopData.deliveryEnabled,
         shopType:shopData.shopType ? {
             id:shopData.shopType.id,
             name:shopData.shopType.name,
@@ -416,7 +527,7 @@ const findFullShopData = asyncHandler(async(req,res)=>{
 
     if(!shopId) throw new apiError(400," shopId is not passed!")
 
-    const cacheKey = `buyer:shop:full:v3:${shopId}`;
+    const cacheKey = `buyer:shop:full:v4:${shopId}`;
     const cachedShop = await getCachedData(cacheKey);
     if(cachedShop){
         return res.status(200).json(new apiResponse(200,cachedShop,"full shop data fetched"));
@@ -439,6 +550,7 @@ const findFullShopData = asyncHandler(async(req,res)=>{
             s."Verified",
             s."MinimumDeliveryRate",
             s."FreeDeliveryRate",
+            s."deliveryEnabled",
             s.latitude,
             s.longitude,
             CASE WHEN st.id IS NULL THEN NULL ELSE jsonb_build_object(
@@ -468,9 +580,41 @@ const findFullShopData = asyncHandler(async(req,res)=>{
                     'itemId',i.id,
                     'name',i.name,
                     'pricing',si.pricing,
+                    'pricingMode',si."pricingMode",
+                    'unit',si.unit,
+                    'displayUnit',si."displayUnit",
+                    'pricePerUnit',si."pricePerUnit",
+                    'minOrderQuantity',si."minOrderQuantity",
+                    'quantityStep',si."quantityStep",
+                    'availableQuantityValue',si."availableQuantityValue",
                     'availableQuantity',si."availableQuantity",
                     'imageUrl',COALESCE(si."imageUrl",i."imageUrl"),
                     'description',si.description,
+                    'variantGroups',COALESCE((
+                        SELECT jsonb_agg(jsonb_build_object(
+                            'id',variant_group.id,
+                            'name',variant_group.name,
+                            'required',variant_group.required,
+                            'minSelect',variant_group."minSelect",
+                            'maxSelect',variant_group."maxSelect",
+                            'sortOrder',variant_group."sortOrder",
+                            'active',variant_group.active,
+                            'options',COALESCE((
+                                SELECT jsonb_agg(jsonb_build_object(
+                                    'id',variant_option.id,
+                                    'label',variant_option.label,
+                                    'subLabel',variant_option."subLabel",
+                                    'amount',variant_option.amount,
+                                    'sortOrder',variant_option."sortOrder",
+                                    'active',variant_option.active
+                                ) ORDER BY variant_option."sortOrder")
+                                FROM "ShopItemVariantOption" variant_option
+                                WHERE variant_option."groupId" = variant_group.id
+                            ),'[]'::jsonb)
+                        ) ORDER BY variant_group."sortOrder")
+                        FROM "ShopItemVariantGroup" variant_group
+                        WHERE variant_group."shopItemId" = si.id
+                    ),'[]'::jsonb),
                     'category',CASE WHEN category.id IS NULL THEN NULL ELSE jsonb_build_object(
                         'id',category.id,
                         'name',category.name,
@@ -499,6 +643,38 @@ const findFullShopData = asyncHandler(async(req,res)=>{
                             'name',master_item.name,
                             'quantity',combo_item.quantity,
                             'pricing',combo_shop_item.pricing,
+                            'pricingMode',combo_shop_item."pricingMode",
+                            'unit',combo_shop_item.unit,
+                            'displayUnit',combo_shop_item."displayUnit",
+                            'pricePerUnit',combo_shop_item."pricePerUnit",
+                            'minOrderQuantity',combo_shop_item."minOrderQuantity",
+                            'quantityStep',combo_shop_item."quantityStep",
+                            'availableQuantityValue',combo_shop_item."availableQuantityValue",
+                            'variantGroups',COALESCE((
+                                SELECT jsonb_agg(jsonb_build_object(
+                                    'id',variant_group.id,
+                                    'name',variant_group.name,
+                                    'required',variant_group.required,
+                                    'minSelect',variant_group."minSelect",
+                                    'maxSelect',variant_group."maxSelect",
+                                    'sortOrder',variant_group."sortOrder",
+                                    'active',variant_group.active,
+                                    'options',COALESCE((
+                                        SELECT jsonb_agg(jsonb_build_object(
+                                            'id',variant_option.id,
+                                            'label',variant_option.label,
+                                            'subLabel',variant_option."subLabel",
+                                            'amount',variant_option.amount,
+                                            'sortOrder',variant_option."sortOrder",
+                                            'active',variant_option.active
+                                        ) ORDER BY variant_option."sortOrder")
+                                        FROM "ShopItemVariantOption" variant_option
+                                        WHERE variant_option."groupId" = variant_group.id
+                                    ),'[]'::jsonb)
+                                ) ORDER BY variant_group."sortOrder")
+                                FROM "ShopItemVariantGroup" variant_group
+                                WHERE variant_group."shopItemId" = combo_shop_item.id
+                            ),'[]'::jsonb),
                             'imageUrl',COALESCE(combo_shop_item."imageUrl",master_item."imageUrl")
                         ))
                         FROM "ComboItem" combo_item
@@ -526,6 +702,75 @@ const findFullShopData = asyncHandler(async(req,res)=>{
 
     return res.status(200).json(new apiResponse(200,responseData,"full shop data fetched"))
 })
+
+const fetchShopCustomers = asyncHandler(async(req,res)=>{
+    const {shopId} = req.params;
+    const pagination = getPagination(req.query,{defaultLimit:20,maxLimit:100});
+
+    if(!shopId) throw new apiError(400,"shop id is required");
+
+    const shop = await prisma.shop.findUnique({
+        where:{
+            id:shopId
+        },
+        select:{
+            id:true,
+            shopName:true,
+            ownerId:true
+        }
+    });
+
+    if(!shop) throw new apiError(404,"shop not found");
+    if(req.currentUser?.role !== "ADMIN" && shop.ownerId !== req.userData?.id){
+        throw new apiError(403,"You can only fetch customers for your own shop");
+    }
+
+    const [totalRows,customers] = await Promise.all([
+        prisma.$queryRaw`
+            SELECT COUNT(DISTINCT orders."userId")::int AS total
+            FROM "Order" orders
+            WHERE orders."shopId" = ${shopId}
+        `,
+        prisma.$queryRaw`
+            SELECT
+                users.id,
+                users.name,
+                users.email,
+                users.phone,
+                users."profileImg",
+                users.address,
+                users.latitude,
+                users.longitude,
+                COUNT(orders.id)::int AS "totalOrders",
+                COUNT(orders.id) FILTER (WHERE orders."currentOrderStatus" = 'DONE')::int AS "completedOrders",
+                COUNT(orders.id) FILTER (WHERE orders."currentOrderStatus" = 'CANCELLED')::int AS "cancelledOrders",
+                COALESCE(SUM(orders."totalAmount"),0)::int AS "totalSpent",
+                MAX(orders."createdAt") AS "lastOrderAt"
+            FROM "Order" orders
+            INNER JOIN "User" users ON users.id = orders."userId"
+            WHERE orders."shopId" = ${shopId}
+            GROUP BY users.id
+            ORDER BY MAX(orders."createdAt") DESC
+            LIMIT ${pagination.take}
+            OFFSET ${pagination.skip}
+        `
+    ]);
+
+    const total = totalRows?.[0]?.total || 0;
+
+    return res.status(200).json(new apiResponse(200,{
+        shop:{
+            id:shop.id,
+            shopName:shop.shopName
+        },
+        pagination:buildPaginationMeta({
+            page:pagination.page,
+            limit:pagination.limit,
+            total
+        }),
+        customers
+    },"shop customers fetched successfully"));
+});
 
 // ADMIN
 const setShopTrialPeriod = asyncHandler(async(req,res)=>{
@@ -756,8 +1001,15 @@ const editShopSettings = asyncHandler(async(req,res)=>{
         timings,
         minimumDeliveryRate,
         freeDeliveryRate,
+        deliveryEnabled,
         latitude,
-        longitude
+        longitude,
+        feature,
+        features,
+        featureEnabled,
+        enabled,
+        featureOverrides,
+        overrides
     } = req.body;
 
     if(!shopId) throw new apiError(400,"shop id is required");
@@ -769,7 +1021,8 @@ const editShopSettings = asyncHandler(async(req,res)=>{
         select:{
             id:true,
             ownerId:true,
-            shopImage:true
+            shopImage:true,
+            slug:true
         }
     });
 
@@ -780,6 +1033,14 @@ const editShopSettings = asyncHandler(async(req,res)=>{
     }
 
     const dataToUpdate = {};
+    const featureOverrideInputs = buildShopFeatureOverrideInputs({
+        feature,
+        features,
+        featureEnabled,
+        enabled,
+        featureOverrides,
+        overrides
+    });
 
     if(shopName !== undefined){
         const updatedShopName = String(shopName).trim();
@@ -826,6 +1087,10 @@ const editShopSettings = asyncHandler(async(req,res)=>{
             throw new apiError(400,"freeDeliveryRate must be a valid positive number");
         }
         dataToUpdate.FreeDeliveryRate = Math.round(parsedFreeDeliveryRate);
+    }
+
+    if(deliveryEnabled !== undefined){
+        dataToUpdate.deliveryEnabled = parseOptionalBoolean(deliveryEnabled,"deliveryEnabled") ?? true;
     }
 
     const shopImg = req.files?.shopimg?.[0]?.path;
@@ -931,18 +1196,49 @@ const editShopSettings = asyncHandler(async(req,res)=>{
         }
     }
 
-    if(!Object.keys(dataToUpdate).length){
+    if(!Object.keys(dataToUpdate).length && featureOverrideInputs.length === 0){
         throw new apiError(400,"no shop settings provided for update");
     }
 
-    const shopData = await prisma.shop.update({
+    if(Object.keys(dataToUpdate).length){
+        await prisma.shop.update({
+            where:{
+                id:shopId
+            },
+            data:dataToUpdate
+        });
+    }
+
+    if(featureOverrideInputs.length > 0){
+        const uniqueOverrides = [...new Map(featureOverrideInputs.map((override)=>[override.feature,override])).values()];
+        await prisma.$transaction(
+            uniqueOverrides.map((override)=>prisma.shopFeatureOverride.upsert({
+                where:{
+                    shopId_feature:{
+                        shopId,
+                        feature:override.feature
+                    }
+                },
+                update:{
+                    enabled:override.enabled
+                },
+                create:{
+                    shopId,
+                    feature:override.feature,
+                    enabled:override.enabled
+                }
+            }))
+        );
+    }
+
+    const shopData = await prisma.shop.findUnique({
         where:{
             id:shopId
         },
-        data:dataToUpdate,
         select:{
             id:true,
             shopName:true,
+            slug:true,
             shopImage:true,
             Address:true,
             Tags:true,
@@ -964,8 +1260,15 @@ const editShopSettings = asyncHandler(async(req,res)=>{
                     }
                 }
             },
+            featureOverrides:{
+                select:{
+                    feature:true,
+                    enabled:true
+                }
+            },
             MinimumDeliveryRate:true,
             FreeDeliveryRate:true,
+            deliveryEnabled:true,
             latitude:true,
             longitude:true,
             timings:{
@@ -983,6 +1286,8 @@ const editShopSettings = asyncHandler(async(req,res)=>{
         }
     });
 
+    await invalidateShopCaches(shopData);
+
     return res.status(200).json(new apiResponse(200,{
         id:shopData.id,
         shopName:shopData.shopName,
@@ -999,8 +1304,14 @@ const editShopSettings = asyncHandler(async(req,res)=>{
             slug:shopData.shopType.slug,
             features:shopData.shopType.features.map((feature)=>feature.feature)
         } : null,
+        features:{
+            baseFeatures:shopData.shopType?.features.map((feature)=>feature.feature) || [],
+            overrides:shopData.featureOverrides,
+            effectiveFeatures:getEffectiveShopFeatures(shopData)
+        },
         minimumDeliveryRate:shopData.MinimumDeliveryRate,
         freeDeliveryRate:shopData.FreeDeliveryRate,
+        deliveryEnabled:shopData.deliveryEnabled,
         latitude:shopData.latitude,
         longitude:shopData.longitude,
         timings:shopData.timings
@@ -1095,6 +1406,172 @@ const setShopStatus = asyncHandler(async(req,res)=>{
     },"shop status updated successfully"));
 })
 
+const toggleShopAvailability = asyncHandler(async(req,res)=>{
+    const {shopId} = req.params;
+
+    if(!shopId) throw new apiError(400,"shop id is required");
+
+    const existingShop = await prisma.shop.findUnique({
+        where:{
+            id:shopId
+        },
+        select:{
+            id:true,
+            ownerId:true,
+            shopName:true,
+            OpeningTime:true,
+            ClosingTime:true,
+            ShopOpenStatus:true,
+            status:true,
+            deliveryEnabled:true,
+            Holidays:true,
+            timings:{
+                orderBy:{
+                    dayOfWeek:"asc"
+                },
+                select:{
+                    dayOfWeek:true,
+                    startMinute:true,
+                    endMinute:true,
+                    active:true
+                }
+            }
+        }
+    });
+
+    if(!existingShop) throw new apiError(404,"shop not found");
+
+    if(req.currentUser?.role !== "ADMIN" && existingShop.ownerId !== req.userData?.id){
+        throw new apiError(403,"you are not allowed to update this shop availability");
+    }
+
+    const shopOpenInput = req.body.shopOpen ?? req.body.isOpen ?? req.body.open;
+    const explicitStatusInput = req.body.status ?? req.body.shopOpenStatus;
+    const deliveryInput = req.body.deliveryEnabled ?? req.body.deliveryOn ?? req.body.isDeliveryEnabled;
+    const shouldToggleShop = parseOptionalBoolean(req.body.toggleShop, "toggleShop") === true;
+    const shouldToggleDelivery = parseOptionalBoolean(req.body.toggleDelivery, "toggleDelivery") === true;
+    const currentOpenState = calculateShopOpenState(existingShop);
+    const dataToUpdate = {};
+
+    if(explicitStatusInput !== undefined){
+        const nextStatus = parseShopStatus(explicitStatusInput);
+        dataToUpdate.status = nextStatus;
+        dataToUpdate.ShopOpenStatus = nextStatus;
+    }else if(shopOpenInput !== undefined){
+        const shopOpen = parseOptionalBoolean(shopOpenInput,"shopOpen");
+        if(shopOpen === null) throw new apiError(400,"shopOpen must be true or false");
+        const nextStatus = shopOpen ? "OPEN" : "CLOSED";
+        dataToUpdate.status = nextStatus;
+        dataToUpdate.ShopOpenStatus = nextStatus;
+    }else if(shouldToggleShop || (deliveryInput === undefined && !shouldToggleDelivery)){
+        const nextStatus = currentOpenState.openStatus === "OPEN" ? "CLOSED" : "OPEN";
+        dataToUpdate.status = nextStatus;
+        dataToUpdate.ShopOpenStatus = nextStatus;
+    }
+
+    if(deliveryInput !== undefined){
+        const nextDeliveryEnabled = parseOptionalBoolean(deliveryInput,"deliveryEnabled");
+        if(nextDeliveryEnabled === null) throw new apiError(400,"deliveryEnabled must be true or false");
+        dataToUpdate.deliveryEnabled = nextDeliveryEnabled;
+    }else if(shouldToggleDelivery){
+        dataToUpdate.deliveryEnabled = !existingShop.deliveryEnabled;
+    }
+
+    if(!Object.keys(dataToUpdate).length){
+        throw new apiError(400,"no shop availability fields provided");
+    }
+
+    const shopData = await prisma.shop.update({
+        where:{
+            id:shopId
+        },
+        data:dataToUpdate,
+        select:{
+            id:true,
+            shopName:true,
+            ownerId:true,
+            OpeningTime:true,
+            ClosingTime:true,
+            ShopOpenStatus:true,
+            status:true,
+            deliveryEnabled:true,
+            Holidays:true,
+            timings:{
+                orderBy:{
+                    dayOfWeek:"asc"
+                },
+                select:{
+                    dayOfWeek:true,
+                    startMinute:true,
+                    endMinute:true,
+                    active:true
+                }
+            },
+            updatedAt:true
+        }
+    });
+
+    const openState = calculateShopOpenState(shopData);
+
+    return res.status(200).json(new apiResponse(200,{
+        id:shopData.id,
+        shopName:shopData.shopName,
+        configuredStatus:openState.configuredStatus,
+        openStatus:openState.openStatus,
+        isOpenNow:openState.isOpenNow,
+        deliveryEnabled:shopData.deliveryEnabled,
+        todayTiming:openState.todayTiming
+    },"shop availability updated successfully"));
+});
+
+const fetchAllShops = asyncHandler(async(req,res)=>{
+    const pagination = getPagination(req.query,{defaultLimit:20,maxLimit:100});
+
+    const [shops,total] = await Promise.all([
+        prisma.shop.findMany({
+            orderBy:{
+                createdAt:"desc"
+            },
+            skip:pagination.skip,
+            take:pagination.take,
+            select:{
+                id:true,
+                shopName:true,
+                shopImage:true,
+                Address:true,
+                Tags:true,
+                latitude:true,
+                longitude:true,
+                slug:true,
+                deliveryEnabled:true,
+                Verified:true
+            }
+        }),
+        prisma.shop.count()
+    ]);
+
+    return res.status(200).json(new apiResponse(200,{
+        pagination:buildPaginationMeta({
+            page:pagination.page,
+            limit:pagination.limit,
+            total
+        }),
+        shops:shops.map((shop)=>({
+            id:shop.id,
+            name:shop.shopName,
+            img:shop.shopImage,
+            tags:shop.Tags,
+            slug:shop.slug,
+            verified:shop.Verified,
+            deliveryEnabled:shop.deliveryEnabled,
+            location:{
+                address:shop.Address,
+                latitude:shop.latitude,
+                longitude:shop.longitude
+            }
+        }))
+    },"shops fetched successfully"));
+});
 
 const findNearbyShops = asyncHandler(async(req,res)=>{
     const buyerId = req.userData?.id;
@@ -1132,7 +1609,7 @@ const findNearbyShops = asyncHandler(async(req,res)=>{
     const longitudeScale = Math.abs(Math.cos((buyer.latitude * Math.PI) / 180));
     const longitudeDelta = longitudeScale < 0.000001 ? 180 : radiusKm / (111.32 * longitudeScale);
     const debugNearby = isTruthyQuery(req.query.debug);
-    const cacheKey = `buyer:shops:nearby:v2:${buyerId}:${radiusKm}:${requestedStatus}:${pagination.page}:${pagination.limit}:${debugNearby}`;
+    const cacheKey = `buyer:shops:nearby:v3:${buyerId}:${radiusKm}:${requestedStatus}:${pagination.page}:${pagination.limit}:${debugNearby}`;
 
     if(!debugNearby){
         const cachedNearbyShops = await getCachedData(cacheKey);
@@ -1181,6 +1658,7 @@ const findNearbyShops = asyncHandler(async(req,res)=>{
             },
             MinimumDeliveryRate:true,
             FreeDeliveryRate:true,
+            deliveryEnabled:true,
             latitude:true,
             longitude:true,
             slug:true,
@@ -1273,6 +1751,7 @@ const findNearbyShops = asyncHandler(async(req,res)=>{
             } : null,
             minimumDeliveryRate:shop.MinimumDeliveryRate,
             freeDeliveryRate:shop.FreeDeliveryRate,
+            deliveryEnabled:shop.deliveryEnabled,
             distanceKm:shop.distanceKm,
             configuredStatus:shop.configuredStatus,
             openStatus:shop.openStatus,
@@ -1312,7 +1791,7 @@ const findByShopSlug = asyncHandler(async(req,res)=>{
     const { slug} = req.params
     if(!slug) throw new apiError(400," slug not recieved from user")
 
-    const cacheKey = `buyer:shop:slug:${slug}`;
+    const cacheKey = `buyer:shop:slug:v2:${slug}`;
     const cachedShop = await getCachedData(cacheKey);
     if(cachedShop){
         return res.status(200).json(new apiResponse(200,cachedShop,"slug based shop found"));
@@ -1364,6 +1843,7 @@ const findByShopSlug = asyncHandler(async(req,res)=>{
             },
             MinimumDeliveryRate:true,
             FreeDeliveryRate:true,
+            deliveryEnabled:true,
             latitude:true,
             longitude:true,
             owner: {
@@ -1383,11 +1863,22 @@ const findByShopSlug = asyncHandler(async(req,res)=>{
                 select:{
                     id:true,
                     pricing:true,
+                    pricingMode:true,
+                    unit:true,
+                    displayUnit:true,
+                    pricePerUnit:true,
+                    minOrderQuantity:true,
+                    quantityStep:true,
+                    availableQuantityValue:true,
                     availableQuantity:true,
                     imageUrl:true,
                     description:true,
                     sortOrderId:true,
                     active:true,
+                    variantGroups:{
+                        orderBy:{sortOrder:"asc"},
+                        select:shopItemVariantSelect
+                    },
                     item:{
                         select:{
                             id:true,
@@ -1446,8 +1937,19 @@ const findByShopSlug = asyncHandler(async(req,res)=>{
                                 select:{
                                     id:true,
                                     pricing:true,
+                                    pricingMode:true,
+                                    unit:true,
+                                    displayUnit:true,
+                                    pricePerUnit:true,
+                                    minOrderQuantity:true,
+                                    quantityStep:true,
+                                    availableQuantityValue:true,
                                     imageUrl:true,
                                     description:true,
+                                    variantGroups:{
+                                        orderBy:{sortOrder:"asc"},
+                                        select:shopItemVariantSelect
+                                    },
                                     item:{
                                         select:{
                                             id:true,
@@ -1686,9 +2188,12 @@ export {
     makeSellerGoLive,
     deleteSeller,
     findFullShopData,
+    fetchShopCustomers,
+    fetchAllShops,
     setShopTrialPeriod,
     setShopTimings,
     setShopStatus,
+    toggleShopAvailability,
     editShopSettings,
     findNearbyShops,
     findByShopSlug,

@@ -19,6 +19,7 @@ import { revenueRouter } from "./routes/revenue.routes.js";
 import { bannerRouter } from "./routes/banners.routes.js";
 import { shopTypeRouter } from "./routes/shopTypes.routes.js";
 import { billingRouter } from "./routes/billing.routes.js";
+import { analyticsRouter } from "./routes/analytics.routes.js";
 import { asyncHandler } from "./utils/asyncHandler.js";
 import { startBillingScheduler } from "./utils/billingScheduler.js";
 export const app = express()
@@ -70,6 +71,7 @@ app.use("/offers", offerRouter);
 app.use("/revenue", revenueRouter);
 app.use("/banners", bannerRouter);
 app.use("/billing", billingRouter);
+app.use("/analytics", analyticsRouter);
 
 app.get("/", (req, res) => {
   const logo = `

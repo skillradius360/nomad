@@ -4,6 +4,14 @@ import { deleteCacheByPattern, getOrSetCachedData } from "../../utils/cache.js";
 import { buildPaginationMeta, getPagination } from "../../utils/pagination.js";
 import { shopHasFeature } from "../../utils/shopFeatures.js";
 import { releaseShopSlot, reserveShopSlot } from "../../utils/billing.js";
+import {
+    calculateShopItemLowestPrice,
+    formatShopItemVariantGroups,
+    formatShopItemPricing,
+    getShopItemPricingMode,
+    hasShopItemVariants,
+    shopItemVariantSelect
+} from "../../utils/shopItemVariants.js";
 
 const comboListSelect = {
     id:true,
@@ -48,8 +56,19 @@ const comboListSelect = {
                 select:{
                     id:true,
                     pricing:true,
+                    pricingMode:true,
+                    unit:true,
+                    displayUnit:true,
+                    pricePerUnit:true,
+                    minOrderQuantity:true,
+                    quantityStep:true,
+                    availableQuantityValue:true,
                     availableQuantity:true,
                     imageUrl:true,
+                    variantGroups:{
+                        orderBy:{sortOrder:"asc"},
+                        select:shopItemVariantSelect
+                    },
                     item:{
                         select:{
                             id:true,
@@ -107,6 +126,10 @@ const formatComboListItem = (combo)=>({
         comboItemId:comboItem.id,
         quantity:comboItem.quantity,
         pricing:comboItem.item?.pricing,
+        ...formatShopItemPricing(comboItem.item),
+        lowestPrice:calculateShopItemLowestPrice(comboItem.item),
+        hasVariants:hasShopItemVariants(comboItem.item),
+        variantGroups:formatShopItemVariantGroups(comboItem.item?.variantGroups),
         availableQuantity:comboItem.item?.availableQuantity,
         imageUrl:comboItem.item?.imageUrl || comboItem.item?.item?.imageUrl || null,
         itemId:comboItem.item?.item?.id,
@@ -190,7 +213,19 @@ const createCombo = asyncHandler(async(req,res)=>{
             : Promise.resolve(null),
         prisma.shopItem.findMany({
             where:{id:{in:uniqueItemIds},active:true,shopId},
-            select:{id:true,pricing:true}
+            select:{
+                id:true,
+                pricing:true,
+                pricingMode:true,
+                pricePerUnit:true,
+                minOrderQuantity:true,
+                quantityStep:true,
+                variantGroups:{
+                    where:{active:true},
+                    orderBy:{sortOrder:"asc"},
+                    select:shopItemVariantSelect
+                }
+            }
         })
     ]);
 
@@ -200,6 +235,9 @@ const createCombo = asyncHandler(async(req,res)=>{
     if((cuisineId || cuisineName) && !cuisine) throw new apiError(404,"cuisine not found");
     if(comboItemsData.length !== uniqueItemIds.length){
         throw new apiError(404,"one or more selected items were not found for this shop");
+    }
+    if(comboItemsData.some((item)=>getShopItemPricingMode(item) === "MEASURED")){
+        throw new apiError(400,"measured items cannot be added to combos");
     }
     if(!shopHasFeature(shop,"COMBOS")){
         throw new apiError(403,"combos are not enabled for this shop type");
@@ -260,7 +298,7 @@ const createCombo = asyncHandler(async(req,res)=>{
     ].join("::");
 
     const comboTotalPrice = Math.round(comboItems.reduce((sum,comboItem)=>{
-        const itemPrice = Number(comboItem.item.pricing);
+        const itemPrice = calculateShopItemLowestPrice(comboItem.item);
         return sum + itemPrice * comboItem.quantity;
     },0));
 
@@ -269,7 +307,7 @@ const createCombo = asyncHandler(async(req,res)=>{
     }
 
     if(comboItems.some((comboItem)=>{
-        const itemPrice = Number(comboItem.item.pricing);
+        const itemPrice = calculateShopItemLowestPrice(comboItem.item);
         return !Number.isFinite(itemPrice) || itemPrice < 0;
     })){
         throw new apiError(400,"selected item pricing must be valid non-negative numbers");
@@ -453,11 +491,26 @@ const editCombo = asyncHandler(async(req,res)=>{
                 active:true,
                 shopId:targetShopId
             },
-            select:{id:true,pricing:true}
+            select:{
+                id:true,
+                pricing:true,
+                pricingMode:true,
+                pricePerUnit:true,
+                minOrderQuantity:true,
+                quantityStep:true,
+                variantGroups:{
+                    where:{active:true},
+                    orderBy:{sortOrder:"asc"},
+                    select:shopItemVariantSelect
+                }
+            }
         });
 
         if(comboItemsData.length !== uniqueItemIds.length){
             throw new apiError(404,"one or more selected items were not found for this shop");
+        }
+        if(comboItemsData.some((item)=>getShopItemPricingMode(item) === "MEASURED")){
+            throw new apiError(400,"measured items cannot be added to combos");
         }
 
         const shopItemsById = new Map(comboItemsData.map((item)=>[item.id,item]));
@@ -484,7 +537,7 @@ const editCombo = asyncHandler(async(req,res)=>{
         ].join("::");
 
         const comboTotalPrice = Math.round(comboItems.reduce((sum,comboItem)=>{
-            const itemPrice = Number(comboItem.item.pricing);
+            const itemPrice = calculateShopItemLowestPrice(comboItem.item);
             return sum + itemPrice * comboItem.quantity;
         },0));
 
@@ -493,7 +546,7 @@ const editCombo = asyncHandler(async(req,res)=>{
         }
 
         if(comboItems.some((comboItem)=>{
-            const itemPrice = Number(comboItem.item.pricing);
+            const itemPrice = calculateShopItemLowestPrice(comboItem.item);
             return !Number.isFinite(itemPrice) || itemPrice < 0;
         })){
             throw new apiError(400,"selected item pricing must be valid non-negative numbers");
@@ -933,10 +986,21 @@ const comboBuilder = asyncHandler(async(req,res)=>{
         select:{
             id:true,
             pricing:true,
+            pricingMode:true,
+            unit:true,
+            displayUnit:true,
+            pricePerUnit:true,
+            minOrderQuantity:true,
+            quantityStep:true,
+            availableQuantityValue:true,
             availableQuantity:true,
             imageUrl:true,
             description:true,
             sortOrderId:true,
+            variantGroups:{
+                orderBy:{sortOrder:"asc"},
+                select:shopItemVariantSelect
+            },
             item:{
                 select:{
                     id:true,
@@ -964,7 +1028,13 @@ const comboBuilder = asyncHandler(async(req,res)=>{
             category
         },
         categories,
-        items
+        items:items.map((item)=>({
+            ...item,
+            ...formatShopItemPricing(item),
+            lowestPrice:calculateShopItemLowestPrice(item),
+            hasVariants:hasShopItemVariants(item),
+            variantGroups:formatShopItemVariantGroups(item.variantGroups)
+        }))
     },"combo builder data fetched successfully"));
 });
 
