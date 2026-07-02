@@ -275,7 +275,7 @@ const getShopRevenueOverview = asyncHandler(async(req,res)=>{
         prisma.order.aggregate({
             where:{
                 shopId:shop.id,
-                currentOrderStatus:"DONE"
+                currentOrderStatus:"COMPLETED"
             },
             _count:{id:true},
             _sum:{

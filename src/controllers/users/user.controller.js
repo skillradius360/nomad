@@ -228,7 +228,7 @@ const fetchAllUserOverviewData = asyncHandler(async(req,res)=>{
         }),
         prisma.order.aggregate({
             where:{
-                currentOrderStatus:"DONE"
+                currentOrderStatus:"COMPLETED"
             },
             _count:{
                 id:true
@@ -684,12 +684,12 @@ const fetchAdminShops = asyncHandler(async(req,res)=>{
                 SELECT
                     o."shopId",
                     COUNT(o.id)::int AS "totalOrders",
-                    COUNT(o.id) FILTER (WHERE o."currentOrderStatus" = 'DONE')::int AS "completedOrders",
+                    COUNT(o.id) FILTER (WHERE o."currentOrderStatus" = 'COMPLETED')::int AS "completedOrders",
                     COUNT(o.id) FILTER (WHERE o."currentOrderStatus" = 'CANCELLED')::int AS "cancelledOrders",
-                    COALESCE(SUM(o."totalAmount") FILTER (WHERE o."currentOrderStatus" = 'DONE'),0)::int AS "totalRevenue",
-                    COALESCE(SUM(o."paidAmount") FILTER (WHERE o."currentOrderStatus" = 'DONE'),0)::int AS "paidRevenue",
+                    COALESCE(SUM(o."totalAmount") FILTER (WHERE o."currentOrderStatus" = 'COMPLETED'),0)::int AS "totalRevenue",
+                    COALESCE(SUM(o."paidAmount") FILTER (WHERE o."currentOrderStatus" = 'COMPLETED'),0)::int AS "paidRevenue",
                     COALESCE(SUM(o."refundAmount"),0)::int AS "refundAmount",
-                    COALESCE(SUM(o."paidAmount" - o."refundAmount") FILTER (WHERE o."currentOrderStatus" = 'DONE'),0)::int AS "netRevenue"
+                    COALESCE(SUM(o."paidAmount" - o."refundAmount") FILTER (WHERE o."currentOrderStatus" = 'COMPLETED'),0)::int AS "netRevenue"
                 FROM "Order" o
                 GROUP BY o."shopId"
             ) order_metrics ON order_metrics."shopId" = s.id
@@ -797,12 +797,12 @@ const fetchAdminShopById = asyncHandler(async(req,res)=>{
             SELECT
                 o."shopId",
                 COUNT(o.id)::int AS "totalOrders",
-                COUNT(o.id) FILTER (WHERE o."currentOrderStatus" = 'DONE')::int AS "completedOrders",
+                COUNT(o.id) FILTER (WHERE o."currentOrderStatus" = 'COMPLETED')::int AS "completedOrders",
                 COUNT(o.id) FILTER (WHERE o."currentOrderStatus" = 'CANCELLED')::int AS "cancelledOrders",
-                COALESCE(SUM(o."totalAmount") FILTER (WHERE o."currentOrderStatus" = 'DONE'),0)::int AS "totalRevenue",
-                COALESCE(SUM(o."paidAmount") FILTER (WHERE o."currentOrderStatus" = 'DONE'),0)::int AS "paidRevenue",
+                COALESCE(SUM(o."totalAmount") FILTER (WHERE o."currentOrderStatus" = 'COMPLETED'),0)::int AS "totalRevenue",
+                COALESCE(SUM(o."paidAmount") FILTER (WHERE o."currentOrderStatus" = 'COMPLETED'),0)::int AS "paidRevenue",
                 COALESCE(SUM(o."refundAmount"),0)::int AS "refundAmount",
-                COALESCE(SUM(o."paidAmount" - o."refundAmount") FILTER (WHERE o."currentOrderStatus" = 'DONE'),0)::int AS "netRevenue"
+                COALESCE(SUM(o."paidAmount" - o."refundAmount") FILTER (WHERE o."currentOrderStatus" = 'COMPLETED'),0)::int AS "netRevenue"
             FROM "Order" o
             GROUP BY o."shopId"
         ) order_metrics ON order_metrics."shopId" = s.id
@@ -921,7 +921,7 @@ const fetchAdminBuyerById = asyncHandler(async(req,res)=>{
     if(!buyer) throw new apiError(404,"buyer not found");
 
     const totals = await prisma.order.aggregate({
-        where:{userId:buyerId,currentOrderStatus:"DONE"},
+        where:{userId:buyerId,currentOrderStatus:"COMPLETED"},
         _count:{id:true},
         _sum:{totalAmount:true,paidAmount:true,refundAmount:true}
     });
@@ -978,7 +978,7 @@ const fetchAdminSellerById = asyncHandler(async(req,res)=>{
 
     const shopIds = seller.shops.map((shop)=>shop.id);
     const totals = shopIds.length ? await prisma.order.aggregate({
-        where:{shopId:{in:shopIds},currentOrderStatus:"DONE"},
+        where:{shopId:{in:shopIds},currentOrderStatus:"COMPLETED"},
         _count:{id:true},
         _sum:{totalAmount:true,paidAmount:true,refundAmount:true}
     }) : {_count:{id:0},_sum:{}};

@@ -4,8 +4,6 @@ import { buildPaginationMeta, getPagination } from "../../utils/pagination.js";
 import { randomUUID } from "node:crypto";
 import { calculateBpsAmount, getBillingSettings } from "../../utils/billing.js";
 import {
-    getShopItemPricingMode,
-    normalizeMeasuredQuantity,
     parseVariantOptionIds,
     resolveSelectedItemVariants,
     shopItemVariantSelect
@@ -52,8 +50,6 @@ const orderInventoryInclude = {
                 select:{
                     id:true,
                     availableQuantity:true,
-                    pricingMode:true,
-                    availableQuantityValue:true,
                     item:{
                         select:{
                             id:true,
@@ -74,8 +70,6 @@ const orderInventoryInclude = {
                                 select:{
                                     id:true,
                                     availableQuantity:true,
-                                    pricingMode:true,
-                                    availableQuantityValue:true,
                                     item:{
                                         select:{
                                             id:true,
@@ -230,7 +224,6 @@ const applyRevenueDeltas = async(tx,rows)=>{
 const addInventoryUsage = (usageMap, inventoryItem, quantity, name)=>{
     if(!inventoryItem?.id) return;
 
-    const pricingMode = getShopItemPricingMode(inventoryItem);
     const existingUsage = usageMap.get(inventoryItem.id);
     if(existingUsage){
         existingUsage.quantity += quantity;
@@ -241,8 +234,8 @@ const addInventoryUsage = (usageMap, inventoryItem, quantity, name)=>{
         id:inventoryItem.id,
         name,
         quantity,
-        pricingMode,
-        availableQuantity:pricingMode === "MEASURED" ? inventoryItem.availableQuantityValue : inventoryItem.availableQuantity
+        pricingMode:"FIXED",
+        availableQuantity:inventoryItem.availableQuantity
     });
 };
 
@@ -257,18 +250,36 @@ const groupOfferSelections = (selections,idKey)=>selections.reduce((groups,selec
 
 const getOrderInventoryUsage = (order)=>{
     const shopItemUsage = new Map();
+    const variantOptionUsage = new Map();
     const comboUsage = new Map();
 
     order.orderItems.forEach((orderItem)=>{
         if(orderItem.orderItemType === "ITEM"){
-            addInventoryUsage(
-                shopItemUsage,
-                orderItem.shopItem,
-                getShopItemPricingMode(orderItem.shopItem) === "MEASURED"
-                    ? Number(orderItem.quantityValue || orderItem.quantity)
-                    : orderItem.quantity,
-                orderItem.shopItem?.item?.name || orderItem.name || "item"
-            );
+            const variantSnapshots = Array.isArray(orderItem.variantSnapshot) ? orderItem.variantSnapshot : [];
+            const inventoryVariants = variantSnapshots.filter((variant)=>variant.inventoryType && variant.inventoryQuantity !== null && variant.inventoryQuantity !== undefined);
+
+            if(inventoryVariants.length > 0){
+                inventoryVariants.forEach((variant)=>{
+                    const existingUsage = variantOptionUsage.get(variant.optionId);
+                    if(existingUsage){
+                        existingUsage.quantity += Number(variant.inventoryQuantity || 0);
+                        return;
+                    }
+                    variantOptionUsage.set(variant.optionId,{
+                        id:variant.optionId,
+                        name:`${orderItem.name} - ${variant.label}`,
+                        quantity:Number(variant.inventoryQuantity || 0),
+                        inventoryType:variant.inventoryType
+                    });
+                });
+            }else{
+                addInventoryUsage(
+                    shopItemUsage,
+                    orderItem.shopItem,
+                    orderItem.quantity,
+                    orderItem.shopItem?.item?.name || orderItem.name || "item"
+                );
+            }
             return;
         }
 
@@ -288,6 +299,7 @@ const getOrderInventoryUsage = (order)=>{
 
     return {
         shopItemUsage:[...shopItemUsage.values()],
+        variantOptionUsage:[...variantOptionUsage.values()],
         comboUsage:[...comboUsage.values()]
     };
 };
@@ -417,11 +429,13 @@ const requireOrderAccess = async(orderId,currentUser)=>{
 const buildOrderTimeline = (order)=>[
     {status:"NEW",label:"Order placed",at:order.createdAt,done:Boolean(order.createdAt)},
     {status:"PAYMENT_RECEIVED",label:"Payment received",at:order.paymentReceived ? order.updatedAt : null,done:order.paymentReceived},
-    {status:"PREPARING",label:"Seller confirmed",at:null,done:["PREPARING","READY","DONE"].includes(order.currentOrderStatus)},
-    {status:"READY",label:"Order ready",at:null,done:["READY","DONE"].includes(order.currentOrderStatus)},
-    {status:"DONE",label:"Order completed",at:order.completedAt,done:order.currentOrderStatus === "DONE"},
+    {status:"ACCEPTED",label:"Seller accepted",at:null,done:["ACCEPTED","PREPARING","READY","OUT_FOR_DELIVERY","COMPLETED","REFUNDED"].includes(order.currentOrderStatus)},
+    {status:"PREPARING",label:"Order preparing",at:null,done:["PREPARING","READY","OUT_FOR_DELIVERY","COMPLETED","REFUNDED"].includes(order.currentOrderStatus)},
+    {status:"READY",label:"Order ready",at:null,done:["READY","OUT_FOR_DELIVERY","COMPLETED","REFUNDED"].includes(order.currentOrderStatus)},
+    {status:"OUT_FOR_DELIVERY",label:"Out for delivery",at:null,done:["OUT_FOR_DELIVERY","COMPLETED","REFUNDED"].includes(order.currentOrderStatus)},
+    {status:"COMPLETED",label:"Order completed",at:order.completedAt,done:["COMPLETED","REFUNDED"].includes(order.currentOrderStatus)},
     {status:"CANCELLED",label:"Order cancelled",at:order.cancelledAt,done:order.currentOrderStatus === "CANCELLED"},
-    {status:"REFUNDED",label:"Refund recorded",at:order.refundedAt,done:Boolean(order.refundedAt)}
+    {status:"REFUNDED",label:"Refund recorded",at:order.refundedAt,done:order.currentOrderStatus === "REFUNDED"}
 ];
 
 const createOrder = asyncHandler(async(req,res)=>{
@@ -588,13 +602,8 @@ const createOrder = asyncHandler(async(req,res)=>{
                     id:true,
                     pricing:true,
                     availableQuantity:true,
-                    pricingMode:true,
                     unit:true,
                     displayUnit:true,
-                    pricePerUnit:true,
-                    minOrderQuantity:true,
-                    quantityStep:true,
-                    availableQuantityValue:true,
                     item:{
                         select:{
                             id:true,
@@ -630,8 +639,6 @@ const createOrder = asyncHandler(async(req,res)=>{
                                 select:{
                                     id:true,
                                     availableQuantity:true,
-                                    pricingMode:true,
-                                    availableQuantityValue:true,
                                     item:{
                                         select:{
                                             name:true
@@ -724,6 +731,7 @@ const createOrder = asyncHandler(async(req,res)=>{
     const combosById = new Map(combosData.map((combo)=>[combo.id,combo]));
     const orderItemsToCreate = [];
     const shopItemQuantityUsage = new Map();
+    const variantOptionQuantityUsage = new Map();
 
     const addShopItemQuantityUsage = (shopItem, quantity)=>{
         const existingUsage = shopItemQuantityUsage.get(shopItem.id);
@@ -733,76 +741,75 @@ const createOrder = asyncHandler(async(req,res)=>{
             return;
         }
 
-        const pricingMode = getShopItemPricingMode(shopItem);
         shopItemQuantityUsage.set(shopItem.id,{
             id:shopItem.id,
             name:shopItem.item?.name || "item",
-            availableQuantity:pricingMode === "MEASURED" ? shopItem.availableQuantityValue : shopItem.availableQuantity,
+            availableQuantity:shopItem.availableQuantity,
             quantity
+        });
+    };
+
+    const addVariantOptionQuantityUsage = (shopItem, variant)=>{
+        if(!variant.inventoryType || variant.inventoryQuantity === null || variant.inventoryQuantity === undefined) return;
+
+        const existingUsage = variantOptionQuantityUsage.get(variant.optionId);
+        if(existingUsage){
+            existingUsage.quantity += Number(variant.inventoryQuantity);
+            return;
+        }
+
+        variantOptionQuantityUsage.set(variant.optionId,{
+            id:variant.optionId,
+            name:`${shopItem.item?.name || "item"} - ${variant.label}`,
+            quantity:Number(variant.inventoryQuantity),
+            inventoryType:variant.inventoryType,
+            availableQuantity:variant.inventoryType === "VALUE" ? variant.availableQuantityValue : variant.availableQuantity
         });
     };
 
     normalizedItems.forEach((selectedItem)=>{
         const shopItem = shopItemsById.get(String(selectedItem.shopItemId));
-        const pricingMode = getShopItemPricingMode(shopItem);
-
-        if(pricingMode === "MEASURED"){
-            if(selectedItem.variantOptionIds.length > 0){
-                throw new apiError(400,`${shopItem.item.name} does not support variants for measured pricing`);
-            }
-
-            const quantityValue = normalizeMeasuredQuantity(
-                shopItem,
-                selectedItem.quantityValue ?? selectedItem.quantity
-            );
-            const pricePerUnit = Number(shopItem.pricePerUnit);
-            if(!Number.isFinite(pricePerUnit) || pricePerUnit < 0){
-                throw new apiError(400,`${shopItem.item.name} has invalid pricePerUnit`);
-            }
-
-            const itemTotalPrice = Math.round(pricePerUnit * quantityValue);
-            addShopItemQuantityUsage(shopItem,quantityValue);
-
-            orderItemsToCreate.push({
-                orderItemType:"ITEM",
-                shopItemId:shopItem.id,
-                name:shopItem.item.name,
-                quantity:1,
-                quantityValue,
-                priceAtOrderTime:itemTotalPrice,
-                totalPrice:itemTotalPrice,
-                variantSnapshot:[],
-                measurementSnapshot:{
-                    pricingMode,
-                    unit:shopItem.unit,
-                    displayUnit:shopItem.displayUnit,
-                    pricePerUnit,
-                    quantityValue,
-                    minOrderQuantity:shopItem.minOrderQuantity,
-                    quantityStep:shopItem.quantityStep
-                }
-            });
-            return;
-        }
 
         const baseItemPrice = Number(shopItem.pricing);
         if(!Number.isInteger(baseItemPrice) || baseItemPrice < 0){
             throw new apiError(400,`${shopItem.item.name} has invalid pricing`);
         }
-        const selectedVariants = resolveSelectedItemVariants(shopItem,selectedItem.variantOptionIds);
-        const variantAmount = selectedVariants.reduce((sum,variant)=>sum + Number(variant.amount || 0),0);
-        const itemPrice = baseItemPrice + variantAmount;
+        const selectedVariants = resolveSelectedItemVariants(shopItem,selectedItem.variantOptionIds,selectedItem);
+        const pricedVariants = selectedVariants.filter((variant)=>variant.price !== null && variant.price !== undefined);
+        if(pricedVariants.length > 1){
+            throw new apiError(400,`${shopItem.item.name} can use only one priced variant option per order line`);
+        }
+        const variantAmount = selectedVariants.reduce((sum,variant)=>sum + Number(variant.price !== null && variant.price !== undefined ? 0 : variant.amount || 0),0);
+        const pricedVariant = pricedVariants[0];
+        const itemPrice = (pricedVariant ? Number(pricedVariant.price) : baseItemPrice) + variantAmount;
+        const hasVariantInventory = selectedVariants.some((variant)=>variant.inventoryType);
 
-        addShopItemQuantityUsage(shopItem,selectedItem.quantity);
+        if(hasVariantInventory){
+            selectedVariants.forEach((variant)=>addVariantOptionQuantityUsage(shopItem,variant));
+        }else{
+            addShopItemQuantityUsage(shopItem,selectedItem.quantity);
+        }
 
         orderItemsToCreate.push({
             orderItemType:"ITEM",
             shopItemId:shopItem.id,
             name:shopItem.item.name,
-            quantity:selectedItem.quantity,
+            quantity:pricedVariant?.inventoryType === "VALUE" ? 1 : selectedItem.quantity,
+            quantityValue:pricedVariant?.inventoryType === "VALUE" ? pricedVariant.inventoryQuantity : undefined,
             priceAtOrderTime:itemPrice,
-            totalPrice:itemPrice * selectedItem.quantity,
-            variantSnapshot:selectedVariants
+            totalPrice:itemPrice * (pricedVariant?.inventoryType === "VALUE" ? Number(pricedVariant.inventoryQuantity) : selectedItem.quantity),
+            variantSnapshot:selectedVariants,
+            measurementSnapshot:pricedVariant?.inventoryType === "VALUE" ? {
+                pricingMode:"VARIANT",
+                unit:pricedVariant.unit,
+                displayUnit:pricedVariant.displayUnit,
+                pricePerUnit:itemPrice,
+                quantityValue:pricedVariant.inventoryQuantity,
+                minOrderQuantity:pricedVariant.minOrderQuantity,
+                maxOrderQuantity:pricedVariant.maxOrderQuantity,
+                allowCustomQuantity:pricedVariant.allowCustomQuantity,
+                quantityStep:pricedVariant.quantityStep
+            } : undefined
         });
     });
 
@@ -834,6 +841,11 @@ const createOrder = asyncHandler(async(req,res)=>{
 
     shopItemQuantityUsage.forEach((usage)=>{
         if(usage.availableQuantity !== null && usage.quantity > usage.availableQuantity){
+            throw new apiError(400,`${usage.name} does not have enough quantity`);
+        }
+    });
+    variantOptionQuantityUsage.forEach((usage)=>{
+        if(usage.availableQuantity !== null && usage.availableQuantity !== undefined && usage.quantity > usage.availableQuantity){
             throw new apiError(400,`${usage.name} does not have enough quantity`);
         }
     });
@@ -1204,7 +1216,7 @@ const getSellerOrders = asyncHandler(async(req,res)=>{
             ownerId:req.userData?.id
         },
         currentOrderStatus:{
-            in:["NEW","PREPARING","READY"]
+            in:["NEW","ACCEPTED","PREPARING","READY","OUT_FOR_DELIVERY"]
         }
     };
 
@@ -1250,7 +1262,9 @@ const getSellerProcessedOrders = asyncHandler(async(req,res)=>{
         shop:{
             ownerId:req.userData?.id
         },
-        currentOrderStatus:"DONE"
+        currentOrderStatus:{
+            in:["COMPLETED","REFUNDED"]
+        }
     };
 
     const [currentUser,orders,total] = await Promise.all([
@@ -1287,6 +1301,70 @@ const getSellerProcessedOrders = asyncHandler(async(req,res)=>{
         }),
         orders:orders.map(formatOrderListItem)
     },"seller processed orders fetched successfully"));
+});
+
+const validOrderStatuses = ["NEW","ACCEPTED","PREPARING","READY","OUT_FOR_DELIVERY","COMPLETED","CANCELLED","REFUNDED"];
+
+const buildOrderStatusWhere = (status)=>{
+    if(status === undefined || status === null || status === "") return {};
+
+    const requestedStatuses = String(status)
+        .split(",")
+        .map((value)=>value.trim().toUpperCase())
+        .filter(Boolean);
+
+    if(requestedStatuses.length === 0) return {};
+
+    const invalidStatus = requestedStatuses.find((requestedStatus)=>!validOrderStatuses.includes(requestedStatus));
+    if(invalidStatus){
+        throw new apiError(400,`invalid order status: ${invalidStatus}`);
+    }
+
+    return {
+        currentOrderStatus:{
+            in:[...new Set(requestedStatuses)]
+        }
+    };
+};
+
+const getSellerOrderHistory = asyncHandler(async(req,res)=>{
+    const pagination = getPagination(req.query);
+    const where = {
+        shop:{
+            ownerId:req.userData?.id
+        },
+        ...buildOrderStatusWhere(req.query.status)
+    };
+
+    const [currentUser,orders,total] = await Promise.all([
+        prisma.user.findUnique({
+            where:{id:req.userData?.id},
+            select:{id:true,role:true,isBlocked:true}
+        }),
+        prisma.order.findMany({
+            where,
+            select:sellerOrderListSelect,
+            orderBy:{createdAt:"desc"},
+            skip:pagination.skip,
+            take:pagination.take
+        }),
+        prisma.order.count({where})
+    ]);
+
+    if(!currentUser || currentUser.isBlocked) throw new apiError(401,"User blocked or unauthorized");
+    if(currentUser.role !== "SELLER") throw new apiError(403,"Seller access required");
+
+    return res.status(200).json(new apiResponse(200,{
+        pagination:buildPaginationMeta({
+            page:pagination.page,
+            limit:pagination.limit,
+            total
+        }),
+        filters:{
+            status:req.query.status || null
+        },
+        orders:orders.map(formatOrderListItem)
+    },"seller order history fetched successfully"));
 });
 
 const getOrderCurrentStatus = asyncHandler(async(req,res)=>{
@@ -1334,17 +1412,17 @@ const getOrderCurrentStatus = asyncHandler(async(req,res)=>{
 
     if(!canViewOrder) throw new apiError(403,"You cannot view this order");
 
-    const normalFlow = ["NEW","PAYMENT_DONE","PREPARING","READY","DONE"];
+    const normalFlow = ["NEW","PAYMENT_RECEIVED","ACCEPTED","PREPARING","READY","OUT_FOR_DELIVERY","COMPLETED","REFUNDED"];
     const currentStatusIndex = normalFlow.indexOf(order.currentOrderStatus);
     const completed = [];
 
     if(order.currentOrderStatus === "CANCELLED"){
         completed.push("NEW");
-        if(order.paymentReceived) completed.push("PAYMENT_DONE");
+        if(order.paymentReceived) completed.push("PAYMENT_RECEIVED");
         completed.push("CANCELLED");
     }else{
         normalFlow.forEach((status,index)=>{
-            if(status === "PAYMENT_DONE"){
+            if(status === "PAYMENT_RECEIVED"){
                 if(order.paymentReceived) completed.push(status);
                 return;
             }
@@ -1365,7 +1443,9 @@ const getAllProcessedOrders = asyncHandler(async(req,res)=>{
     const pagination = getPagination(req.query);
     const search = typeof req.query.search === "string" ? req.query.search.trim() : "";
     const where = {
-        currentOrderStatus:"DONE"
+        currentOrderStatus:{
+            in:["COMPLETED","REFUNDED"]
+        }
     };
 
     if(search){
@@ -1416,6 +1496,61 @@ const getAllProcessedOrders = asyncHandler(async(req,res)=>{
     },"all processed orders fetched successfully"));
 });
 
+const getAdminOrderHistory = asyncHandler(async(req,res)=>{
+    const pagination = getPagination(req.query);
+    const search = typeof req.query.search === "string" ? req.query.search.trim() : "";
+    const shopId = typeof req.query.shopId === "string" ? req.query.shopId.trim() : "";
+    const where = {
+        ...buildOrderStatusWhere(req.query.status)
+    };
+
+    if(shopId){
+        where.shopId = shopId;
+    }
+
+    if(search){
+        where.OR = [
+            {id:{contains:search,mode:"insensitive"}},
+            {user:{name:{contains:search,mode:"insensitive"}}},
+            {user:{phone:{contains:search,mode:"insensitive"}}},
+            {user:{email:{contains:search,mode:"insensitive"}}},
+            {shop:{shopName:{contains:search,mode:"insensitive"}}}
+        ];
+    }
+
+    const [currentUser,orders,total] = await Promise.all([
+        prisma.user.findUnique({
+            where:{id:req.userData?.id},
+            select:{id:true,role:true,isBlocked:true}
+        }),
+        prisma.order.findMany({
+            where,
+            select:sellerOrderListSelect,
+            orderBy:{createdAt:"desc"},
+            skip:pagination.skip,
+            take:pagination.take
+        }),
+        prisma.order.count({where})
+    ]);
+
+    if(!currentUser || currentUser.isBlocked) throw new apiError(401,"User blocked or unauthorized");
+    if(currentUser.role !== "ADMIN") throw new apiError(403,"Admin access required");
+
+    return res.status(200).json(new apiResponse(200,{
+        pagination:buildPaginationMeta({
+            page:pagination.page,
+            limit:pagination.limit,
+            total
+        }),
+        filters:{
+            status:req.query.status || null,
+            search:search || null,
+            shopId:shopId || null
+        },
+        orders:orders.map(formatOrderListItem)
+    },"admin order history fetched successfully"));
+});
+
 const markPaymentReceived = asyncHandler(async(req,res)=>{
     const { orderId } = req.params;
 
@@ -1435,7 +1570,7 @@ const markPaymentReceived = asyncHandler(async(req,res)=>{
               AND shops."ownerId" = ${req.userData?.id}
               AND owners."role" = 'SELLER'
               AND owners."isBlocked" = FALSE
-              AND orders."currentOrderStatus" NOT IN ('DONE','CANCELLED')
+              AND orders."currentOrderStatus" NOT IN ('COMPLETED','CANCELLED','REFUNDED')
             RETURNING
                 orders."id",
                 orders."currentOrderStatus",
@@ -1516,9 +1651,8 @@ const confirmOrder = asyncHandler(async(req,res)=>{
     if(!order.shop || order.shop.ownerId !== currentUser.id) throw new apiError(403,"You can only manage orders for your own shop");
     if(order.currentOrderStatus !== "NEW") throw new apiError(400,"only new orders can be confirmed");
 
-    const {shopItemUsage,comboUsage} = getOrderInventoryUsage(order);
-    const finiteFixedShopItemUsage = shopItemUsage.filter((usage)=>usage.pricingMode !== "MEASURED" && usage.availableQuantity !== null);
-    const finiteMeasuredShopItemUsage = shopItemUsage.filter((usage)=>usage.pricingMode === "MEASURED" && usage.availableQuantity !== null);
+    const {shopItemUsage,variantOptionUsage,comboUsage} = getOrderInventoryUsage(order);
+    const finiteFixedShopItemUsage = shopItemUsage.filter((usage)=>usage.availableQuantity !== null);
     const finiteComboUsage = comboUsage.filter((usage)=>usage.availableQuantity !== null);
 
     const updatedOrder = await prisma.$transaction(async(tx)=>{
@@ -1566,21 +1700,19 @@ const confirmOrder = asyncHandler(async(req,res)=>{
         if(unavailableShopItem) throw new apiError(400,`${unavailableShopItem.name} does not have enough quantity`);
         if(unavailableCombo) throw new apiError(400,`${unavailableCombo.name} does not have enough quantity`);
 
-        for(const usage of finiteMeasuredShopItemUsage){
-            const updatedMeasuredItem = await tx.shopItem.updateMany({
-                where:{
-                    id:usage.id,
-                    availableQuantityValue:{
-                        gte:usage.quantity
-                    }
-                },
-                data:{
-                    availableQuantityValue:{
-                        decrement:usage.quantity
-                    }
-                }
+        for(const usage of variantOptionUsage){
+            const data = usage.inventoryType === "VALUE"
+                ? {availableQuantityValue:{decrement:usage.quantity}}
+                : {availableQuantity:{decrement:usage.quantity}};
+            const where = usage.inventoryType === "VALUE"
+                ? {id:usage.id,availableQuantityValue:{gte:usage.quantity}}
+                : {id:usage.id,availableQuantity:{gte:usage.quantity}};
+
+            const updatedVariantOption = await tx.shopItemVariantOption.updateMany({
+                where,
+                data
             });
-            if(updatedMeasuredItem.count === 0){
+            if(updatedVariantOption.count === 0){
                 throw new apiError(400,`${usage.name} does not have enough quantity`);
             }
         }
@@ -1590,7 +1722,7 @@ const confirmOrder = asyncHandler(async(req,res)=>{
                 id:order.id
             },
             data:{
-                currentOrderStatus:"PREPARING"
+                currentOrderStatus:"ACCEPTED"
             },
             select:{
                 id:true,
@@ -1599,7 +1731,74 @@ const confirmOrder = asyncHandler(async(req,res)=>{
         });
     });
 
-    return res.status(200).json(new apiResponse(200,updatedOrder,"order confirmed successfully"));
+    return res.status(200).json(new apiResponse(200,updatedOrder,"order accepted successfully"));
+});
+
+const markOrderPreparing = asyncHandler(async(req,res)=>{
+    const { orderId } = req.params;
+
+    requireValidOrderId(orderId);
+
+    let updatedOrder;
+
+    try{
+        updatedOrder = await prisma.order.update({
+            where:{
+                id:orderId,
+                currentOrderStatus:"ACCEPTED",
+                shop:{
+                    ownerId:req.userData?.id,
+                    owner:{
+                        role:"SELLER",
+                        isBlocked:false
+                    }
+                }
+            },
+            data:{
+                currentOrderStatus:"PREPARING"
+            },
+            select:{
+                id:true,
+                currentOrderStatus:true
+            }
+        });
+    }catch(error){
+        if(error?.code !== "P2025") throw error;
+
+        const [currentUser,order] = await Promise.all([
+            prisma.user.findUnique({
+                where:{
+                    id:req.userData?.id
+                },
+                select:{
+                    id:true,
+                    role:true,
+                    isBlocked:true
+                }
+            }),
+            prisma.order.findUnique({
+                where:{
+                    id:orderId
+                },
+                select:{
+                    currentOrderStatus:true,
+                    shop:{
+                        select:{
+                            ownerId:true
+                        }
+                    }
+                }
+            })
+        ]);
+
+        if(!currentUser || currentUser.isBlocked) throw new apiError(401,"User blocked or unauthorized");
+        if(currentUser.role !== "SELLER") throw new apiError(403,"Seller access required");
+        if(!order) throw new apiError(404,"order not found");
+        if(!order.shop || order.shop.ownerId !== currentUser.id) throw new apiError(403,"You can only manage orders for your own shop");
+        throw new apiError(400,"only accepted orders can be marked preparing");
+    }
+
+    return res.status(200).json(new apiResponse(200,updatedOrder,"order marked preparing successfully"));
 });
 
 const markOrderReady = asyncHandler(async(req,res)=>{
@@ -1669,6 +1868,73 @@ const markOrderReady = asyncHandler(async(req,res)=>{
     return res.status(200).json(new apiResponse(200,updatedOrder,"order marked ready successfully"));
 });
 
+const markOrderOutForDelivery = asyncHandler(async(req,res)=>{
+    const { orderId } = req.params;
+
+    requireValidOrderId(orderId);
+
+    let updatedOrder;
+
+    try{
+        updatedOrder = await prisma.order.update({
+            where:{
+                id:orderId,
+                currentOrderStatus:"READY",
+                shop:{
+                    ownerId:req.userData?.id,
+                    owner:{
+                        role:"SELLER",
+                        isBlocked:false
+                    }
+                }
+            },
+            data:{
+                currentOrderStatus:"OUT_FOR_DELIVERY"
+            },
+            select:{
+                id:true,
+                currentOrderStatus:true
+            }
+        });
+    }catch(error){
+        if(error?.code !== "P2025") throw error;
+
+        const [currentUser,order] = await Promise.all([
+            prisma.user.findUnique({
+                where:{
+                    id:req.userData?.id
+                },
+                select:{
+                    id:true,
+                    role:true,
+                    isBlocked:true
+                }
+            }),
+            prisma.order.findUnique({
+                where:{
+                    id:orderId
+                },
+                select:{
+                    currentOrderStatus:true,
+                    shop:{
+                        select:{
+                            ownerId:true
+                        }
+                    }
+                }
+            })
+        ]);
+
+        if(!currentUser || currentUser.isBlocked) throw new apiError(401,"User blocked or unauthorized");
+        if(currentUser.role !== "SELLER") throw new apiError(403,"Seller access required");
+        if(!order) throw new apiError(404,"order not found");
+        if(!order.shop || order.shop.ownerId !== currentUser.id) throw new apiError(403,"You can only manage orders for your own shop");
+        throw new apiError(400,"only ready orders can be marked out for delivery");
+    }
+
+    return res.status(200).json(new apiResponse(200,updatedOrder,"order marked out for delivery successfully"));
+});
+
 const markOrderComplete = asyncHandler(async(req,res)=>{
     const { orderId } = req.params;
 
@@ -1706,7 +1972,7 @@ const markOrderComplete = asyncHandler(async(req,res)=>{
 
     if(!order) throw new apiError(404,"order not found");
     if(!order.shop || order.shop.ownerId !== currentUser.id) throw new apiError(403,"You can only manage orders for your own shop");
-    if(order.currentOrderStatus !== "READY") throw new apiError(400,"only ready orders can be completed");
+    if(!["READY","OUT_FOR_DELIVERY"].includes(order.currentOrderStatus)) throw new apiError(400,"only ready or out-for-delivery orders can be completed");
 
     const completedAt = new Date();
     const dailyPeriodDate = new Date(completedAt.getFullYear(),completedAt.getMonth(),completedAt.getDate());
@@ -1723,7 +1989,7 @@ const markOrderComplete = asyncHandler(async(req,res)=>{
                 id:order.id
             },
             data:{
-                currentOrderStatus:"DONE",
+                currentOrderStatus:"COMPLETED",
                 paymentReceived:true,
                 paidAmount:finalPaidAmount,
                 completedAt
@@ -1818,7 +2084,7 @@ const cancelOrder = asyncHandler(async(req,res)=>{
         throw new apiError(403,"You cannot cancel this order");
     }
 
-    if(order.currentOrderStatus === "DONE" || order.currentOrderStatus === "CANCELLED"){
+    if(["COMPLETED","CANCELLED","REFUNDED"].includes(order.currentOrderStatus)){
         throw new apiError(400,"completed or cancelled orders cannot be cancelled");
     }
 
@@ -1830,8 +2096,8 @@ const cancelOrder = asyncHandler(async(req,res)=>{
         throw new apiError(400,"refundAmount must be a valid number");
     }
 
-    const shouldRestoreInventory = order.currentOrderStatus === "PREPARING" || order.currentOrderStatus === "READY";
-    const {shopItemUsage,comboUsage} = getOrderInventoryUsage(order);
+    const shouldRestoreInventory = ["ACCEPTED","PREPARING","READY","OUT_FOR_DELIVERY"].includes(order.currentOrderStatus);
+    const {shopItemUsage,variantOptionUsage,comboUsage} = getOrderInventoryUsage(order);
     const cancelledAt = new Date();
     const dailyPeriodDate = new Date(cancelledAt.getFullYear(),cancelledAt.getMonth(),cancelledAt.getDate());
     const monthlyPeriodDate = new Date(cancelledAt.getFullYear(),cancelledAt.getMonth(),1);
@@ -1839,8 +2105,7 @@ const cancelOrder = asyncHandler(async(req,res)=>{
 
     const updatedOrder = await prisma.$transaction(async(tx)=>{
         if(shouldRestoreInventory){
-            const fixedShopItemUsage = shopItemUsage.filter((usage)=>usage.pricingMode !== "MEASURED");
-            const measuredShopItemUsage = shopItemUsage.filter((usage)=>usage.pricingMode === "MEASURED");
+            const fixedShopItemUsage = shopItemUsage;
 
             await tx.$queryRaw`
                 WITH shop_item_usage AS (
@@ -1878,19 +2143,15 @@ const cancelOrder = asyncHandler(async(req,res)=>{
                     (SELECT count(*) FROM restored_combos) AS "comboCount"
             `;
 
-            for(const usage of measuredShopItemUsage){
-                await tx.shopItem.updateMany({
+            for(const usage of variantOptionUsage){
+                await tx.shopItemVariantOption.updateMany({
                     where:{
                         id:usage.id,
-                        availableQuantityValue:{
-                            not:null
-                        }
+                        ...(usage.inventoryType === "VALUE" ? {availableQuantityValue:{not:null}} : {availableQuantity:{not:null}})
                     },
-                    data:{
-                        availableQuantityValue:{
-                            increment:usage.quantity
-                        }
-                    }
+                    data:usage.inventoryType === "VALUE"
+                        ? {availableQuantityValue:{increment:usage.quantity}}
+                        : {availableQuantity:{increment:usage.quantity}}
                 });
             }
         }
@@ -1967,7 +2228,7 @@ const refundCompletedOrder = asyncHandler(async(req,res)=>{
 
     if(!order) throw new apiError(404,"order not found");
     if(!order.shop || order.shop.ownerId !== currentUser.id) throw new apiError(403,"You can only refund orders for your own shop");
-    if(order.currentOrderStatus !== "DONE") throw new apiError(400,"only completed orders can be refunded");
+    if(order.currentOrderStatus !== "COMPLETED") throw new apiError(400,"only completed orders can be refunded");
 
     const paidAmount = order.paidAmount > 0 ? order.paidAmount : order.totalAmount;
     const normalizedRefundAmount = paidAmount - order.refundAmount;
@@ -1987,6 +2248,7 @@ const refundCompletedOrder = asyncHandler(async(req,res)=>{
                 id:order.id
             },
             data:{
+                currentOrderStatus:"REFUNDED",
                 refundAmount:{
                     increment:normalizedRefundAmount
                 },
@@ -2046,14 +2308,18 @@ export {
     getMyOrders,
     getSellerOrders,
     getSellerProcessedOrders,
+    getSellerOrderHistory,
     getOrderDetails,
     getOrderTimeline,
     getOrderInvoice,
     getOrderCurrentStatus,
     getAllProcessedOrders,
+    getAdminOrderHistory,
     markPaymentReceived,
     confirmOrder,
+    markOrderPreparing,
     markOrderReady,
+    markOrderOutForDelivery,
     markOrderComplete,
     cancelOrder,
     refundCompletedOrder

@@ -2,10 +2,13 @@ import { Router } from "express";
 import {
     createShopType,
     deleteShopType,
+    deleteShopTypeItems,
     deleteShopFeatureOverrides,
     fetchShopFeatureOverrides,
+    fetchShopTypeItems,
     fetchShopTypeById,
     fetchShopTypes,
+    updateShopTypeItems,
     updateShopFeatureOverrides,
     updateShopType
 } from "../controllers/shopTypes/shopTypes.controller.js";
@@ -25,6 +28,11 @@ shopTypeRouter.route("/shops/:shopId/features")
     .get(isAdmin,fetchShopFeatureOverrides)
     .patch(isAdmin,writeRateLimit,updateShopFeatureOverrides)
     .delete(isAdmin,writeRateLimit,deleteShopFeatureOverrides);
+
+shopTypeRouter.route("/:shopTypeId/items")
+    .get(isAdmin,fetchShopTypeItems)
+    .patch(isAdmin,writeRateLimit,updateShopTypeItems)
+    .delete(isAdmin,writeRateLimit,deleteShopTypeItems);
 
 shopTypeRouter.route("/:shopTypeId")
     .get(fetchShopTypeById)

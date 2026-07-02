@@ -1,7 +1,7 @@
 import { apiError } from "./handler.js";
 
-const VALID_SHOP_ITEM_PRICING_MODES = ["FIXED","MEASURED"];
 const VALID_SHOP_ITEM_UNITS = ["KG","GRAM","LITRE","ML","PIECE","DOZEN","PACK","BUNCH","BOX","CUSTOM"];
+const VALID_VARIANT_PACKAGING_TYPES = ["LOOSE","PACKAGED","CUSTOM"];
 
 const shopItemVariantSelect = {
     id:true,
@@ -18,21 +18,24 @@ const shopItemVariantSelect = {
             label:true,
             subLabel:true,
             amount:true,
+            price:true,
+            packagingType:true,
+            unit:true,
+            displayUnit:true,
+            quantityValue:true,
+            minOrderQuantity:true,
+            maxOrderQuantity:true,
+            quantityStep:true,
+            allowCustomQuantity:true,
+            availableQuantity:true,
+            availableQuantityValue:true,
             sortOrder:true,
             active:true
         }
     }
 };
 
-const shopItemPricingSelect = {
-    pricingMode:true,
-    unit:true,
-    displayUnit:true,
-    pricePerUnit:true,
-    minOrderQuantity:true,
-    quantityStep:true,
-    availableQuantityValue:true
-};
+const shopItemPricingSelect = {};
 
 const parseOptionalPositiveNumber = (value,fieldName,{allowZero = false} = {})=>{
     if(value === undefined || value === null || value === "") return null;
@@ -49,45 +52,14 @@ const normalizeShopItemPricingInput = (body,{creating = false} = {})=>{
         ? undefined
         : String(body.pricingMode).trim().toUpperCase();
 
-    if(requestedMode && !VALID_SHOP_ITEM_PRICING_MODES.includes(requestedMode)){
-        throw new apiError(400,"pricingMode must be FIXED or MEASURED");
+    if(requestedMode && requestedMode !== "FIXED"){
+        throw new apiError(400,"measured pricing has been removed; use variant options for loose or packaged pricing");
     }
 
     const pricingMode = requestedMode || (creating ? "FIXED" : undefined);
     const data = {};
 
     if(pricingMode) data.pricingMode = pricingMode;
-
-    if(pricingMode === "MEASURED"){
-        const unit = body.unit === undefined || body.unit === null || body.unit === ""
-            ? undefined
-            : String(body.unit).trim().toUpperCase();
-        if(!unit || !VALID_SHOP_ITEM_UNITS.includes(unit)){
-            throw new apiError(400,`unit must be one of ${VALID_SHOP_ITEM_UNITS.join(", ")}`);
-        }
-
-        const pricePerUnit = parseOptionalPositiveNumber(body.pricePerUnit ?? body.pricing,"pricePerUnit");
-        if(pricePerUnit === null) throw new apiError(400,"pricePerUnit is required for measured items");
-
-        const minOrderQuantity = parseOptionalPositiveNumber(body.minOrderQuantity ?? body.minQuantity ?? 1,"minOrderQuantity");
-        const quantityStep = parseOptionalPositiveNumber(body.quantityStep ?? body.step ?? minOrderQuantity,"quantityStep");
-        const availableQuantityValue = parseOptionalPositiveNumber(
-            body.availableQuantityValue ?? body.availableQuantity,
-            "availableQuantityValue",
-            {allowZero:true}
-        );
-
-        data.pricing = String(Math.round(pricePerUnit));
-        data.unit = unit;
-        data.displayUnit = body.displayUnit === undefined || body.displayUnit === null || body.displayUnit === ""
-            ? unit.toLowerCase()
-            : String(body.displayUnit).trim();
-        data.pricePerUnit = pricePerUnit;
-        data.minOrderQuantity = minOrderQuantity;
-        data.quantityStep = quantityStep;
-        data.availableQuantityValue = availableQuantityValue;
-        data.availableQuantity = null;
-    }
 
     if(pricingMode === "FIXED"){
         data.unit = null;
@@ -98,19 +70,10 @@ const normalizeShopItemPricingInput = (body,{creating = false} = {})=>{
         data.availableQuantityValue = null;
     }
 
-    if(!pricingMode && !creating){
-        if(body.unit !== undefined) data.unit = body.unit === null || body.unit === "" ? null : String(body.unit).trim().toUpperCase();
-        if(body.displayUnit !== undefined) data.displayUnit = body.displayUnit === null || body.displayUnit === "" ? null : String(body.displayUnit).trim();
-        if(body.pricePerUnit !== undefined) data.pricePerUnit = parseOptionalPositiveNumber(body.pricePerUnit,"pricePerUnit");
-        if(body.minOrderQuantity !== undefined) data.minOrderQuantity = parseOptionalPositiveNumber(body.minOrderQuantity,"minOrderQuantity");
-        if(body.quantityStep !== undefined) data.quantityStep = parseOptionalPositiveNumber(body.quantityStep,"quantityStep");
-        if(body.availableQuantityValue !== undefined) data.availableQuantityValue = parseOptionalPositiveNumber(body.availableQuantityValue,"availableQuantityValue",{allowZero:true});
-    }
-
     return data;
 };
 
-const getShopItemPricingMode = (shopItem)=>String(shopItem?.pricingMode || "FIXED").toUpperCase();
+const getShopItemPricingMode = ()=>"FIXED";
 
 const formatShopItemVariantGroups = (variantGroups = [])=>variantGroups.map((group)=>({
     id:group.id,
@@ -125,19 +88,23 @@ const formatShopItemVariantGroups = (variantGroups = [])=>variantGroups.map((gro
         label:option.label,
         subLabel:option.subLabel,
         amount:option.amount,
+        price:option.price ?? null,
+        packagingType:option.packagingType || null,
+        unit:option.unit || null,
+        displayUnit:option.displayUnit || null,
+        quantityValue:option.quantityValue ?? null,
+        minOrderQuantity:option.minOrderQuantity ?? null,
+        maxOrderQuantity:option.maxOrderQuantity ?? null,
+        quantityStep:option.quantityStep ?? null,
+        allowCustomQuantity:option.allowCustomQuantity ?? false,
+        availableQuantity:option.availableQuantity ?? null,
+        availableQuantityValue:option.availableQuantityValue ?? null,
         sortOrder:option.sortOrder,
         active:option.active
     })) || []
 }));
 
 const calculateShopItemLowestPrice = (shopItem)=>{
-    if(getShopItemPricingMode(shopItem) === "MEASURED"){
-        const pricePerUnit = Number(shopItem?.pricePerUnit);
-        const minQuantity = Number(shopItem?.minOrderQuantity || shopItem?.quantityStep || 1);
-        if(!Number.isFinite(pricePerUnit) || pricePerUnit < 0 || !Number.isFinite(minQuantity) || minQuantity <= 0) return 0;
-        return Math.max(0,Math.round(pricePerUnit * minQuantity));
-    }
-
     const basePrice = Number(shopItem?.pricing);
     if(!Number.isFinite(basePrice) || basePrice < 0) return 0;
 
@@ -146,7 +113,7 @@ const calculateShopItemLowestPrice = (shopItem)=>{
 
         const activeAmounts = (group.options || [])
             .filter((option)=>option.active)
-            .map((option)=>Number(option.amount))
+            .map((option)=>option.price !== null && option.price !== undefined ? Number(option.price) : Number(option.amount))
             .filter((amount)=>Number.isFinite(amount) && amount >= 0)
             .sort((first,second)=>first - second);
         const minSelect = Math.max(Number(group.minSelect || 0),group.required ? 1 : 0);
@@ -162,36 +129,7 @@ const hasShopItemVariants = (shopItem)=>shopItem?.variantGroups?.some((group)=>
     group.active && group.options?.some((option)=>option.active)
 ) || false;
 
-const formatShopItemPricing = (shopItem)=>({
-    pricingMode:getShopItemPricingMode(shopItem),
-    unit:shopItem?.unit || null,
-    displayUnit:shopItem?.displayUnit || null,
-    pricePerUnit:shopItem?.pricePerUnit ?? null,
-    minOrderQuantity:shopItem?.minOrderQuantity ?? null,
-    quantityStep:shopItem?.quantityStep ?? null,
-    availableQuantityValue:shopItem?.availableQuantityValue ?? null
-});
-
-const normalizeMeasuredQuantity = (shopItem,rawQuantityValue)=>{
-    const quantityValue = Number(rawQuantityValue);
-    if(!Number.isFinite(quantityValue) || quantityValue <= 0){
-        throw new apiError(400,`${shopItem.item?.name || "item"} quantityValue must be a positive number`);
-    }
-
-    const minOrderQuantity = Number(shopItem.minOrderQuantity || shopItem.quantityStep || 1);
-    const quantityStep = Number(shopItem.quantityStep || minOrderQuantity || 1);
-    if(quantityValue < minOrderQuantity){
-        throw new apiError(400,`${shopItem.item?.name || "item"} minimum order quantity is ${minOrderQuantity}`);
-    }
-
-    const stepCount = Math.round((quantityValue - minOrderQuantity) / quantityStep);
-    const expectedQuantity = minOrderQuantity + stepCount * quantityStep;
-    if(Math.abs(expectedQuantity - quantityValue) > 0.000001){
-        throw new apiError(400,`${shopItem.item?.name || "item"} quantityValue must follow step ${quantityStep}`);
-    }
-
-    return Number(quantityValue.toFixed(3));
-};
+const formatShopItemPricing = ()=>({});
 
 const parseVariantOptionIds = (value)=>{
     if(value === undefined || value === null || value === "") return [];
@@ -213,7 +151,47 @@ const parseVariantOptionIds = (value)=>{
     throw new apiError(400,"variantOptionIds must be an array");
 };
 
-const resolveSelectedItemVariants = (shopItem,selectedOptionIds)=>{
+const getVariantOptionPackagingType = (option)=>String(option?.packagingType || "").toUpperCase();
+
+const getVariantOptionInventoryQuantity = (option,selectedItem)=>{
+    const packagingType = getVariantOptionPackagingType(option);
+    if(packagingType === "LOOSE"){
+        const rawQuantityValue = selectedItem.quantityValue ?? selectedItem.weight ?? selectedItem.measurementQuantity ?? selectedItem.quantity;
+        const quantityValue = Number(rawQuantityValue);
+        if(!Number.isFinite(quantityValue) || quantityValue <= 0){
+            throw new apiError(400,`${option.label} quantityValue must be a positive number`);
+        }
+
+        const minOrderQuantity = Number(option.minOrderQuantity || option.quantityStep || option.quantityValue || 1);
+        const maxOrderQuantity = option.maxOrderQuantity === null || option.maxOrderQuantity === undefined ? null : Number(option.maxOrderQuantity);
+        const quantityStep = Number(option.quantityStep || minOrderQuantity || 1);
+        const allowCustomQuantity = Boolean(option.allowCustomQuantity);
+        if(quantityValue < minOrderQuantity){
+            throw new apiError(400,`${option.label} minimum order quantity is ${minOrderQuantity}`);
+        }
+        if(maxOrderQuantity !== null && quantityValue > maxOrderQuantity){
+            throw new apiError(400,`${option.label} maximum order quantity is ${maxOrderQuantity}`);
+        }
+
+        if(!allowCustomQuantity){
+            const stepCount = Math.round((quantityValue - minOrderQuantity) / quantityStep);
+            const expectedQuantity = minOrderQuantity + stepCount * quantityStep;
+            if(Math.abs(expectedQuantity - quantityValue) > 0.000001){
+                throw new apiError(400,`${option.label} quantityValue must follow step ${quantityStep}`);
+            }
+        }
+
+        return Number(quantityValue.toFixed(3));
+    }
+
+    const quantity = Number(selectedItem.quantity ?? 1);
+    if(!Number.isInteger(quantity) || quantity < 1){
+        throw new apiError(400,`${option.label} quantity must be a positive integer`);
+    }
+    return quantity;
+};
+
+const resolveSelectedItemVariants = (shopItem,selectedOptionIds,selectedItem = {})=>{
     const variantGroups = shopItem.variantGroups || [];
     const uniqueOptionIds = [...new Set(selectedOptionIds.map(String).filter(Boolean))];
     if(uniqueOptionIds.length !== selectedOptionIds.length){
@@ -244,7 +222,20 @@ const resolveSelectedItemVariants = (shopItem,selectedOptionIds)=>{
             optionId:option.id,
             label:option.label,
             subLabel:option.subLabel,
-            amount:option.amount
+            amount:option.amount,
+            price:option.price ?? null,
+            packagingType:option.packagingType || null,
+            unit:option.unit || null,
+            displayUnit:option.displayUnit || null,
+            quantityValue:option.quantityValue ?? null,
+            minOrderQuantity:option.minOrderQuantity ?? null,
+            maxOrderQuantity:option.maxOrderQuantity ?? null,
+            quantityStep:option.quantityStep ?? null,
+            allowCustomQuantity:option.allowCustomQuantity ?? false,
+            availableQuantity:option.availableQuantity ?? null,
+            availableQuantityValue:option.availableQuantityValue ?? null,
+            inventoryQuantity:option.packagingType ? getVariantOptionInventoryQuantity(option,selectedItem) : null,
+            inventoryType:getVariantOptionPackagingType(option) === "LOOSE" ? "VALUE" : option.packagingType ? "COUNT" : null
         })));
     }
 
@@ -259,9 +250,10 @@ export {
     calculateShopItemLowestPrice,
     formatShopItemVariantGroups,
     formatShopItemPricing,
+    getVariantOptionInventoryQuantity,
+    getVariantOptionPackagingType,
     getShopItemPricingMode,
     hasShopItemVariants,
-    normalizeMeasuredQuantity,
     normalizeShopItemPricingInput,
     parseVariantOptionIds,
     resolveSelectedItemVariants,

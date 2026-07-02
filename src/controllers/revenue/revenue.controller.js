@@ -74,7 +74,7 @@ const fetchShopRevenueStats = asyncHandler(async(req,res)=>{
     const lifetimeOrders = await prisma.order.aggregate({
         where:{
             shopId:shop.id,
-            currentOrderStatus:"DONE"
+            currentOrderStatus:"COMPLETED"
         },
         _count:{
             id:true
@@ -163,7 +163,7 @@ const fetchRepeatCustomersByShop = asyncHandler(async(req,res)=>{
 
     const whereData = {
         shopId:shop.id,
-        currentOrderStatus:"DONE"
+        currentOrderStatus:"COMPLETED"
     };
 
     if(startDate || endDate){

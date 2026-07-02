@@ -12,6 +12,7 @@ import {
     updateOffer,
     updateOfferActiveStatus
 } from "../controllers/offers/offers.controller.js";
+import { isBuyer } from "../middleware/admin.middleware.js";
 import { verifyJWT } from "../middleware/auth.middleware.js";
 import { upload } from "../middleware/multer.middleware.js";
 import { buyerReadRateLimit, expensiveReadRateLimit, uploadRateLimit, writeRateLimit } from "../middleware/rateLimit.middleware.js";
@@ -23,6 +24,7 @@ offerRouter.use(verifyJWT);
 const offerImageUpload = upload.fields([{ name: "offerImg", maxCount: 1 }]);
 
 offerRouter.route("/create").post(uploadRateLimit, offerImageUpload, createOffer);
+offerRouter.route("/buyer/:shopId/fetchoffers").get(isBuyer,buyerReadRateLimit, fetchAvailableOffersByShop);
 offerRouter.route("/shop/:shopId/available").get(buyerReadRateLimit, fetchAvailableOffersByShop);
 offerRouter.route("/shop/:shopId/buyers/search").get(expensiveReadRateLimit, searchBuyersForOfferTarget);
 offerRouter.route("/shop/:shopId").get(buyerReadRateLimit, fetchOffersByShop);

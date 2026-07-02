@@ -65,11 +65,11 @@ const getAdminAnalyticsSummary = asyncHandler(async(req,res)=>{
         prisma.order.count({where:{createdAt:{gte:todayStart}}}),
         prisma.order.count({where:{createdAt:{gte:monthStart}}}),
         prisma.order.aggregate({
-            where:{currentOrderStatus:"DONE",createdAt:{gte:todayStart}},
+            where:{currentOrderStatus:"COMPLETED",createdAt:{gte:todayStart}},
             _sum:{totalAmount:true}
         }),
         prisma.order.aggregate({
-            where:{currentOrderStatus:"DONE",createdAt:{gte:monthStart}},
+            where:{currentOrderStatus:"COMPLETED",createdAt:{gte:monthStart}},
             _sum:{totalAmount:true}
         }),
         prisma.user.count({where:{role:"BUYER",createdAt:{gte:monthStart}}}),
@@ -82,7 +82,7 @@ const getAdminAnalyticsSummary = asyncHandler(async(req,res)=>{
             FROM (
                 SELECT o."userId"
                 FROM "Order" o
-                WHERE o."currentOrderStatus" = 'DONE'
+                WHERE o."currentOrderStatus" = 'COMPLETED'
                 GROUP BY o."userId"
                 HAVING COUNT(o.id) >= 2
             ) repeat_buyers
@@ -120,7 +120,7 @@ const getAdminAnalyticsTrends = asyncHandler(async(req,res)=>{
             SELECT
                 o."createdAt"::date AS day,
                 COUNT(o.id)::int AS orders,
-                COALESCE(SUM(o."totalAmount") FILTER (WHERE o."currentOrderStatus" = 'DONE'),0)::int AS revenue
+                COALESCE(SUM(o."totalAmount") FILTER (WHERE o."currentOrderStatus" = 'COMPLETED'),0)::int AS revenue
             FROM "Order" o
             WHERE o."createdAt" >= ${start}
               AND o."createdAt" <= ${end}
@@ -179,9 +179,9 @@ const getAdminAnalyticsTopShops = asyncHandler(async(req,res)=>{
         LEFT JOIN (
             SELECT
                 o."shopId",
-                COUNT(o.id) FILTER (WHERE o."currentOrderStatus" = 'DONE')::int AS "completedOrders",
-                COALESCE(SUM(o."totalAmount") FILTER (WHERE o."currentOrderStatus" = 'DONE'),0)::int AS "completedRevenue",
-                COALESCE(SUM(o."paidAmount" - o."refundAmount") FILTER (WHERE o."currentOrderStatus" = 'DONE'),0)::int AS "netRevenue"
+                COUNT(o.id) FILTER (WHERE o."currentOrderStatus" = 'COMPLETED')::int AS "completedOrders",
+                COALESCE(SUM(o."totalAmount") FILTER (WHERE o."currentOrderStatus" = 'COMPLETED'),0)::int AS "completedRevenue",
+                COALESCE(SUM(o."paidAmount" - o."refundAmount") FILTER (WHERE o."currentOrderStatus" = 'COMPLETED'),0)::int AS "netRevenue"
             FROM "Order" o
             GROUP BY o."shopId"
         ) order_metrics ON order_metrics."shopId" = s.id
@@ -223,7 +223,7 @@ const getAdminAnalyticsTopBuyers = asyncHandler(async(req,res)=>{
         FROM "User" u
         JOIN "Order" o ON o."userId" = u.id
         WHERE u.role = 'BUYER'
-          AND o."currentOrderStatus" = 'DONE'
+          AND o."currentOrderStatus" = 'COMPLETED'
         GROUP BY u.id
         ORDER BY "netSpend" DESC, "completedOrders" DESC
         LIMIT ${limit}

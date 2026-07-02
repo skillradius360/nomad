@@ -8,7 +8,6 @@ import {
     calculateShopItemLowestPrice,
     formatShopItemVariantGroups,
     formatShopItemPricing,
-    getShopItemPricingMode,
     hasShopItemVariants,
     shopItemVariantSelect
 } from "../../utils/shopItemVariants.js";
@@ -56,13 +55,6 @@ const comboListSelect = {
                 select:{
                     id:true,
                     pricing:true,
-                    pricingMode:true,
-                    unit:true,
-                    displayUnit:true,
-                    pricePerUnit:true,
-                    minOrderQuantity:true,
-                    quantityStep:true,
-                    availableQuantityValue:true,
                     availableQuantity:true,
                     imageUrl:true,
                     variantGroups:{
@@ -216,10 +208,6 @@ const createCombo = asyncHandler(async(req,res)=>{
             select:{
                 id:true,
                 pricing:true,
-                pricingMode:true,
-                pricePerUnit:true,
-                minOrderQuantity:true,
-                quantityStep:true,
                 variantGroups:{
                     where:{active:true},
                     orderBy:{sortOrder:"asc"},
@@ -235,9 +223,6 @@ const createCombo = asyncHandler(async(req,res)=>{
     if((cuisineId || cuisineName) && !cuisine) throw new apiError(404,"cuisine not found");
     if(comboItemsData.length !== uniqueItemIds.length){
         throw new apiError(404,"one or more selected items were not found for this shop");
-    }
-    if(comboItemsData.some((item)=>getShopItemPricingMode(item) === "MEASURED")){
-        throw new apiError(400,"measured items cannot be added to combos");
     }
     if(!shopHasFeature(shop,"COMBOS")){
         throw new apiError(403,"combos are not enabled for this shop type");
@@ -494,10 +479,6 @@ const editCombo = asyncHandler(async(req,res)=>{
             select:{
                 id:true,
                 pricing:true,
-                pricingMode:true,
-                pricePerUnit:true,
-                minOrderQuantity:true,
-                quantityStep:true,
                 variantGroups:{
                     where:{active:true},
                     orderBy:{sortOrder:"asc"},
@@ -509,10 +490,6 @@ const editCombo = asyncHandler(async(req,res)=>{
         if(comboItemsData.length !== uniqueItemIds.length){
             throw new apiError(404,"one or more selected items were not found for this shop");
         }
-        if(comboItemsData.some((item)=>getShopItemPricingMode(item) === "MEASURED")){
-            throw new apiError(400,"measured items cannot be added to combos");
-        }
-
         const shopItemsById = new Map(comboItemsData.map((item)=>[item.id,item]));
         const comboItems = normalizedItems.map((selectedItem)=>{
             const item = shopItemsById.get(String(selectedItem.itemId));
@@ -986,13 +963,6 @@ const comboBuilder = asyncHandler(async(req,res)=>{
         select:{
             id:true,
             pricing:true,
-            pricingMode:true,
-            unit:true,
-            displayUnit:true,
-            pricePerUnit:true,
-            minOrderQuantity:true,
-            quantityStep:true,
-            availableQuantityValue:true,
             availableQuantity:true,
             imageUrl:true,
             description:true,

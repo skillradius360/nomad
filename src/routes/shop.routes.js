@@ -17,6 +17,7 @@ import {
     editShopSettings,
     findNearbyShops,
     findByShopSlug,
+    fetchBuyerShopItems,
     
     
     // approveRecharge,
@@ -33,6 +34,7 @@ shopRouter.route("/").get(buyerReadRateLimit, fetchAllShops);
 shopRouter.route("/admin/all").get(isAdmin, expensiveReadRateLimit, fetchAllShops);
 shopRouter.route("/start/:shopId").patch(isAdmin, writeRateLimit, makeSellerGoLive);
 shopRouter.route("/nearby").get(isBuyer, buyerReadRateLimit, findNearbyShops);
+shopRouter.route("/buyer/:shopId/fetchshopitems").get(isBuyer, buyerReadRateLimit, fetchBuyerShopItems);
 shopRouter.route("/:shopId/customers").get(isAdminOrSeller, expensiveReadRateLimit, fetchShopCustomers);
 shopRouter.route("/:shopId/trial").patch(isAdmin, writeRateLimit, setShopTrialPeriod);
 shopRouter.route("/:shopId/timings").patch(isAdminOrSeller, writeRateLimit, setShopTimings);

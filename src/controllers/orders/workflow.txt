@@ -1,20 +1,37 @@
 BUYER checkout
     POST /orders/checkout
         creates order with status NEW
-        decrements item/combo inventory
 
 SELLER sees active orders
     GET /orders/seller
-        returns NEW, PREPARING, READY orders
+        returns NEW, ACCEPTED, PREPARING, READY, OUT_FOR_DELIVERY orders
 
-SELLER confirms order
+SELLER accepts order
     PATCH /orders/:orderId/confirm
-        NEW -> PREPARING
+        NEW -> ACCEPTED
+        reserves/decrements item, combo, and variant-option inventory
+
+SELLER starts preparing
+    PATCH /orders/:orderId/prepare
+        ACCEPTED -> PREPARING
 
 SELLER marks ready
     PATCH /orders/:orderId/ready
         PREPARING -> READY
 
+SELLER marks out for delivery
+    PATCH /orders/:orderId/out-for-delivery
+        READY -> OUT_FOR_DELIVERY
+
 SELLER completes order
     PATCH /orders/:orderId/complete
-        READY -> DONE
+        READY or OUT_FOR_DELIVERY -> COMPLETED
+
+BUYER / SELLER / ADMIN cancels order
+    PATCH /orders/:orderId/cancel
+        NEW, ACCEPTED, PREPARING, READY, or OUT_FOR_DELIVERY -> CANCELLED
+        restores inventory if order had already been accepted
+
+SELLER refunds completed order
+    PATCH /orders/:orderId/refund
+        COMPLETED -> REFUNDED

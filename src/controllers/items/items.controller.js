@@ -3,16 +3,17 @@ import { apiError, apiResponse, asyncHandler } from "../../utils/handler.js";
 import { cloudUploader } from "../../utils/cloudinary.upload.js";
 import { deleteCacheByPattern, getOrSetCachedData } from "../../utils/cache.js";
 import { buildPaginationMeta, getPagination } from "../../utils/pagination.js";
-import { shopHasFeature } from "../../utils/shopFeatures.js";
+import { formatShopFeatureMap, shopHasFeature } from "../../utils/shopFeatures.js";
 import { releaseShopSlot, reserveShopSlot } from "../../utils/billing.js";
 import {
     formatShopItemPricing,
-    getShopItemPricingMode,
     normalizeShopItemPricingInput
 } from "../../utils/shopItemVariants.js";
 
 const MASTER_ITEMS_CACHE_TTL = 120;
 const SHOP_ITEMS_CACHE_TTL = 45;
+const VALID_SHOP_ITEM_UNITS = ["KG","GRAM","LITRE","ML","PIECE","DOZEN","PACK","BUNCH","BOX","CUSTOM"];
+const VALID_VARIANT_PACKAGING_TYPES = ["LOOSE","PACKAGED","CUSTOM"];
 
 const invalidateMasterItemCaches = async({includeShopItems = true} = {})=>{
     const invalidations = [deleteCacheByPattern("catalog:master:items:*")];
@@ -74,9 +75,33 @@ const masterItemListSelect = {
     }
 };
 
+const formatMasterItemListItem = (item)=>({
+    id:item.id,
+    name:item.name,
+    description:item.description,
+    imageUrl:item.imageUrl,
+    sortOrderId:item.sortOrderId,
+    active:item.active,
+    categoryId:item.categoryId,
+    categoryName:item.category?.name || null,
+    categorySlug:item.category?.slug || null,
+    cuisineId:item.category?.cuisineId || null,
+    cuisineName:item.category?.cuisine?.name || null,
+    cuisineSlug:item.category?.cuisine?.slug || null,
+    alreadyAdded:item.shopItems ? item.shopItems.length > 0 : undefined
+});
+
 const shopItemInclude = {
     item:{
         include:masterItemInclude
+    },
+    brand:{
+        select:{
+            id:true,
+            name:true,
+            slug:true,
+            imageUrl:true
+        }
     },
     variantGroups:{
         orderBy:{sortOrder:"asc"},
@@ -103,6 +128,17 @@ const shopItemVariantSelect = {
             label:true,
             subLabel:true,
             amount:true,
+            price:true,
+            packagingType:true,
+            unit:true,
+            displayUnit:true,
+            quantityValue:true,
+            minOrderQuantity:true,
+            maxOrderQuantity:true,
+            quantityStep:true,
+            allowCustomQuantity:true,
+            availableQuantity:true,
+            availableQuantityValue:true,
             sortOrder:true,
             active:true
         }
@@ -112,17 +148,21 @@ const shopItemVariantSelect = {
 const shopItemListSelect = {
     id:true,
     itemId:true,
+    brandId:true,
+    brand:{
+        select:{
+            id:true,
+            name:true,
+            slug:true,
+            imageUrl:true
+        }
+    },
     pricing:true,
     availableQuantity:true,
-    pricingMode:true,
-    unit:true,
-    displayUnit:true,
-    pricePerUnit:true,
-    minOrderQuantity:true,
-    quantityStep:true,
-    availableQuantityValue:true,
     imageUrl:true,
     description:true,
+    prescriptionRequired:true,
+    prescriptionNote:true,
     sortOrderId:true,
     active:true,
     item:{
@@ -160,19 +200,23 @@ const formatShopItemVariantGroups = (variantGroups = [])=>variantGroups.map((gro
         label:option.label,
         subLabel:option.subLabel,
         amount:option.amount,
+        price:option.price ?? null,
+        packagingType:option.packagingType || null,
+        unit:option.unit || null,
+        displayUnit:option.displayUnit || null,
+        quantityValue:option.quantityValue ?? null,
+        minOrderQuantity:option.minOrderQuantity ?? null,
+        maxOrderQuantity:option.maxOrderQuantity ?? null,
+        quantityStep:option.quantityStep ?? null,
+        allowCustomQuantity:option.allowCustomQuantity ?? false,
+        availableQuantity:option.availableQuantity ?? null,
+        availableQuantityValue:option.availableQuantityValue ?? null,
         sortOrder:option.sortOrder,
         active:option.active
     })) || []
 }));
 
 const calculateShopItemLowestPrice = (shopItem)=>{
-    if(getShopItemPricingMode(shopItem) === "MEASURED"){
-        const pricePerUnit = Number(shopItem.pricePerUnit);
-        const minQuantity = Number(shopItem.minOrderQuantity || shopItem.quantityStep || 1);
-        if(!Number.isFinite(pricePerUnit) || pricePerUnit < 0 || !Number.isFinite(minQuantity) || minQuantity <= 0) return 0;
-        return Math.max(0,Math.round(pricePerUnit * minQuantity));
-    }
-
     const basePrice = Number(shopItem.pricing);
     if(!Number.isFinite(basePrice) || basePrice < 0) return 0;
 
@@ -181,7 +225,7 @@ const calculateShopItemLowestPrice = (shopItem)=>{
 
         const activeOptions = (group.options || [])
             .filter((option)=>option.active)
-            .map((option)=>Number(option.amount))
+            .map((option)=>option.price !== null && option.price !== undefined ? Number(option.price) : Number(option.amount))
             .filter((amount)=>Number.isFinite(amount) && amount >= 0)
             .sort((first,second)=>first - second);
         const minSelect = Math.max(Number(group.minSelect || 0),group.required ? 1 : 0);
@@ -204,7 +248,16 @@ const formatShopItemListItem = (shopItem)=>({
     variantGroups:formatShopItemVariantGroups(shopItem.variantGroups),
     availableQuantity:shopItem.availableQuantity,
     imageUrl:shopItem.imageUrl || shopItem.item?.imageUrl || null,
+    brandId:shopItem.brandId || null,
+    brand:shopItem.brand ? {
+        id:shopItem.brand.id,
+        name:shopItem.brand.name,
+        slug:shopItem.brand.slug,
+        imageUrl:shopItem.brand.imageUrl
+    } : null,
     description:shopItem.description,
+    prescriptionRequired:shopItem.prescriptionRequired || false,
+    prescriptionNote:shopItem.prescriptionNote || null,
     sortOrderId:shopItem.sortOrderId,
     active:shopItem.active,
     categoryId:shopItem.item?.categoryId || null,
@@ -247,6 +300,46 @@ const parseTagIdsField = (value,fieldName = "tagIds")=>{
     }
 
     return [stringValue];
+};
+
+const parseShopTypeIdsField = (value)=>{
+    if(value === undefined || value === null || value === "") return [];
+    if(Array.isArray(value)) return value.map((shopTypeId)=>String(shopTypeId).trim()).filter(Boolean);
+
+    const stringValue = String(value).trim();
+    if(!stringValue) return [];
+
+    if(stringValue.startsWith("[")){
+        try{
+            const parsed = JSON.parse(stringValue);
+            if(Array.isArray(parsed)){
+                return parsed.map((shopTypeId)=>String(shopTypeId).trim()).filter(Boolean);
+            }
+        }catch(error){
+        }
+        throw new apiError(400,"shopTypeIds must be a shop type id or a valid JSON array of shop type ids");
+    }
+
+    return [stringValue];
+};
+
+const parseOptionalNumberField = (value,fieldName,{integer = false,allowZero = true} = {})=>{
+    if(value === undefined || value === null || value === "") return null;
+    const parsed = Number(value);
+    const validNumber = Number.isFinite(parsed) && parsed >= (allowZero ? 0 : Number.MIN_VALUE);
+    if(!validNumber || (integer && !Number.isInteger(parsed)) || (!allowZero && parsed <= 0)){
+        throw new apiError(400,`${fieldName} must be a ${integer ? "whole " : ""}${allowZero ? "non-negative" : "positive"} number`);
+    }
+    return parsed;
+};
+
+const parseOptionalEnumField = (value,fieldName,allowedValues)=>{
+    if(value === undefined || value === null || value === "") return null;
+    const normalized = String(value).trim().toUpperCase();
+    if(!allowedValues.includes(normalized)){
+        throw new apiError(400,`${fieldName} must be one of ${allowedValues.join(", ")}`);
+    }
+    return normalized;
 };
 
 const parseShopItemVariantGroups = (rawValue)=>{
@@ -309,10 +402,46 @@ const parseShopItemVariantGroups = (rawValue)=>{
                 throw new apiError(400,`${name} option amount must be a non-negative integer`);
             }
 
+            const packagingType = parseOptionalEnumField(option.packagingType ?? option.type,"packagingType",VALID_VARIANT_PACKAGING_TYPES);
+            const unit = parseOptionalEnumField(option.unit,"unit",VALID_SHOP_ITEM_UNITS);
+            const price = parseOptionalNumberField(option.price ?? option.sellingPrice,"price",{integer:true,allowZero:true});
+            const quantityValue = parseOptionalNumberField(option.quantityValue ?? option.weight ?? option.measurementQuantity,"quantityValue",{allowZero:false});
+            const minOrderQuantity = parseOptionalNumberField(option.minOrderQuantity ?? option.minQuantity ?? option.minWeight,"minOrderQuantity",{allowZero:false});
+            const maxOrderQuantity = parseOptionalNumberField(option.maxOrderQuantity ?? option.maxQuantity ?? option.maxWeight,"maxOrderQuantity",{allowZero:false});
+            const quantityStep = parseOptionalNumberField(option.quantityStep ?? option.step ?? option.weightStep,"quantityStep",{allowZero:false});
+            const allowCustomQuantity = parseBooleanField(option.allowCustomQuantity ?? option.allowCustomWeight ?? option.customWeight ?? false,"allowCustomQuantity");
+            const availableQuantity = parseOptionalNumberField(option.availableQuantity ?? option.stock,"availableQuantity",{integer:true,allowZero:true});
+            const availableQuantityValue = parseOptionalNumberField(option.availableQuantityValue ?? option.stockValue,"availableQuantityValue",{allowZero:true});
+
+            if(minOrderQuantity !== null && maxOrderQuantity !== null && minOrderQuantity > maxOrderQuantity){
+                throw new apiError(400,`${label} minOrderQuantity cannot be greater than maxOrderQuantity`);
+            }
+
+            if(packagingType === "LOOSE"){
+                if(!unit) throw new apiError(400,`${label} unit is required for loose variant options`);
+                if(price === null) throw new apiError(400,`${label} price is required for loose variant options`);
+                if(availableQuantity !== null) throw new apiError(400,`${label} loose inventory must use availableQuantityValue`);
+            }
+            if(packagingType === "PACKAGED"){
+                if(price === null) throw new apiError(400,`${label} price is required for packaged variant options`);
+                if(availableQuantityValue !== null) throw new apiError(400,`${label} packaged inventory must use availableQuantity`);
+            }
+
             return {
                 label,
                 subLabel:option.subLabel === undefined || option.subLabel === null ? null : String(option.subLabel).trim(),
                 amount,
+                price,
+                packagingType,
+                unit,
+                displayUnit:option.displayUnit === undefined || option.displayUnit === null || option.displayUnit === "" ? unit?.toLowerCase() || null : String(option.displayUnit).trim(),
+                quantityValue,
+                minOrderQuantity,
+                maxOrderQuantity,
+                quantityStep,
+                allowCustomQuantity,
+                availableQuantity,
+                availableQuantityValue,
                 sortOrder:Number(option.sortOrder ?? optionIndex + 1),
                 active:parseBooleanField(option.active ?? true,`${name} option active`)
             };
@@ -351,6 +480,17 @@ const replaceShopItemVariantGroups = async(tx,shopItemId,variantGroups)=>{
                         label:option.label,
                         subLabel:option.subLabel,
                         amount:option.amount,
+                        price:option.price,
+                        packagingType:option.packagingType,
+                        unit:option.unit,
+                        displayUnit:option.displayUnit,
+                        quantityValue:option.quantityValue,
+                        minOrderQuantity:option.minOrderQuantity,
+                        maxOrderQuantity:option.maxOrderQuantity,
+                        quantityStep:option.quantityStep,
+                        allowCustomQuantity:option.allowCustomQuantity,
+                        availableQuantity:option.availableQuantity,
+                        availableQuantityValue:option.availableQuantityValue,
                         sortOrder:option.sortOrder,
                         active:option.active
                     }))
@@ -445,6 +585,31 @@ const resolveCategory = async({categoryId,categoryName,cuisineName,cuisineId,req
     return category;
 };
 
+const resolveBrand = async({brandId,brandName,required = false})=>{
+    if(!brandId && !brandName){
+        if(required) throw new apiError(400,"brand is required");
+        return null;
+    }
+
+    const brand = await prisma.brand.findFirst({
+        where:{
+            active:true,
+            ...(brandId ? {id:String(brandId)} : {
+                OR:[
+                    {name:{equals:String(brandName).trim(),mode:"insensitive"}},
+                    {slug:String(brandName).trim().toUpperCase().replace(/[^A-Z0-9]+/g,"_").replace(/^_+|_+$/g,"")}
+                ]
+            })
+        },
+        select:{
+            id:true
+        }
+    });
+
+    if(!brand) throw new apiError(404,"brand not found");
+    return brand;
+};
+
 // admin: create a master catalog item
 const createItems = asyncHandler(async(req,res)=>{
     const {
@@ -459,7 +624,9 @@ const createItems = asyncHandler(async(req,res)=>{
         cuisineId,
         tagIds,
         tags,
-        addTag
+        addTag,
+        shopTypeId,
+        shopTypeIds
     } = req.body;
     const itemTitle = String(itemName || name || "").trim();
 
@@ -474,6 +641,20 @@ const createItems = asyncHandler(async(req,res)=>{
 
     const category = await resolveCategory({categoryId,categoryName,cuisineName,cuisineId});
     const normalizedTagIds = await normalizeActiveTagIds(parseTagIdsField(tagIds ?? tags ?? addTag,"tagIds"));
+    const normalizedShopTypeIds = [...new Set(parseShopTypeIdsField(shopTypeIds ?? shopTypeId))];
+
+    if(normalizedShopTypeIds.length){
+        const shopTypeCount = await prisma.shopType.count({
+            where:{
+                id:{
+                    in:normalizedShopTypeIds
+                }
+            }
+        });
+        if(shopTypeCount !== normalizedShopTypeIds.length){
+            throw new apiError(400,"one or more shop type ids are invalid");
+        }
+    }
 
     const existingItem = await prisma.items.findFirst({
         where:{
@@ -487,27 +668,45 @@ const createItems = asyncHandler(async(req,res)=>{
 
     if(existingItem) throw new apiError(409,"item already exists in master list");
 
-    const itemData = await prisma.items.create({
-        data:{
-            name:itemTitle,
-            description,
-            imageUrl:imgUrl.url,
-            sortOrderId:Number(sortOrderId ?? sortOrder ?? 0),
-            categoryId:category?.id,
-            tags:normalizedTagIds.length ? {
-                create:normalizedTagIds.map((tagId)=>({
-                    tag:{
-                        connect:{
-                            id:tagId
+    const itemData = await prisma.$transaction(async(tx)=>{
+        const createdItem = await tx.items.create({
+            data:{
+                name:itemTitle,
+                description,
+                imageUrl:imgUrl.url,
+                sortOrderId:Number(sortOrderId ?? sortOrder ?? 0),
+                categoryId:category?.id,
+                tags:normalizedTagIds.length ? {
+                    create:normalizedTagIds.map((tagId)=>({
+                        tag:{
+                            connect:{
+                                id:tagId
+                            }
                         }
-                    }
-                }))
-            } : undefined
-        },
-        include:masterItemInclude
+                    }))
+                } : undefined
+            },
+            include:masterItemInclude
+        });
+
+        if(normalizedShopTypeIds.length){
+            await tx.shopTypeItem.createMany({
+                data:normalizedShopTypeIds.map((mappedShopTypeId,index)=>({
+                    shopTypeId:mappedShopTypeId,
+                    itemId:createdItem.id,
+                    sortOrder:index
+                })),
+                skipDuplicates:true
+            });
+        }
+
+        return createdItem;
     });
 
     await invalidateMasterItemCaches({includeShopItems:false});
+    if(normalizedShopTypeIds.length){
+        await deleteCacheByPattern("shop-types:*");
+    }
     return res.status(201).json(new apiResponse(201,itemData,"master item created successfully"));
 });
 
@@ -608,7 +807,7 @@ const mapItems = asyncHandler(async(req,res)=>{
 });
 
 const fetchItemsToCategory = asyncHandler(async(req,res)=>{
-    const categoryName = req.params.categoryName || req.query.categoryName || req.body.categoryName;
+    const categoryName = req.params.categoryName || req.query.categoryName || req.body?.categoryName;
 
     if(!categoryName) throw new apiError(400,"category name is required");
 
@@ -728,6 +927,170 @@ const fetchOnlyItems = asyncHandler(async(req,res)=>{
     return res.status(200).json(new apiResponse(200,responseData,"master items fetched successfully"));
 });
 
+const fetchMasterItemsForShop = asyncHandler(async(req,res)=>{
+    const shopId = req.params.shopId || req.query.shopId;
+    const { search } = req.query;
+    const pagination = getPagination(req.query,{defaultLimit:50,maxLimit:100});
+    const includeAlreadyAdded = String(req.query.includeAlreadyAdded || "false").toLowerCase() === "true";
+
+    if(!shopId) throw new apiError(400,"shop id is required");
+
+    const currentUser = req.currentUser || await prisma.user.findUnique({
+        where:{id:req.userData?.id},
+        select:{id:true,role:true,isBlocked:true}
+    });
+
+    if(!currentUser || currentUser.isBlocked) throw new apiError(401,"User blocked or unauthorized");
+
+    const shop = await prisma.shop.findUnique({
+        where:{id:shopId},
+        select:{
+            id:true,
+            shopName:true,
+            ownerId:true,
+            shopType:{
+                select:{
+                    id:true,
+                    name:true,
+                    slug:true,
+                    features:{
+                        where:{enabled:true},
+                        select:{feature:true}
+                    },
+                    catalogItems:{
+                        select:{
+                            itemId:true
+                        }
+                    }
+                }
+            },
+            featureOverrides:{
+                select:{
+                    feature:true,
+                    enabled:true
+                }
+            }
+        }
+    });
+
+    if(!shop) throw new apiError(404,"shop not found");
+    if(currentUser.role !== "ADMIN" && shop.ownerId !== currentUser.id){
+        throw new apiError(403,"You can only fetch master items for your own shop");
+    }
+    if(!shopHasFeature(shop,"ITEMS")){
+        throw new apiError(403,"items are not enabled for this shop type");
+    }
+
+    const mappedItemIds = shop.shopType?.catalogItems?.map((mapping)=>mapping.itemId) || [];
+
+    const hasAutomaticScope = mappedItemIds.length > 0;
+    if(!hasAutomaticScope){
+        return res.status(200).json(new apiResponse(200,{
+            shop:{
+                id:shop.id,
+                shopName:shop.shopName,
+                shopType:shop.shopType ? {
+                    id:shop.shopType.id,
+                    name:shop.shopType.name,
+                    slug:shop.shopType.slug
+                } : null
+            },
+            features:formatShopFeatureMap(shop),
+            pagination:buildPaginationMeta({page:pagination.page,limit:pagination.limit,total:0}),
+            items:[],
+            scope:{
+                source:"SHOP_TYPE",
+                matched:false,
+                message:"No master items are mapped to this shop type. Map items with PATCH /shop-types/:shopTypeId/items."
+            }
+        },"shop master items fetched successfully"));
+    }
+
+    const where = {
+        active:true,
+        AND:[
+            {id:{in:mappedItemIds}},
+            ...(search ? [{
+                OR:[
+                    {name:{contains:String(search).trim(),mode:"insensitive"}},
+                    {description:{contains:String(search).trim(),mode:"insensitive"}}
+                ]
+            }] : [])
+        ],
+        ...(includeAlreadyAdded ? {} : {
+            shopItems:{
+                none:{
+                    shopId
+                }
+            }
+        })
+    };
+
+    const cacheKey = `catalog:master:items:shop:v2:${shopId}:${includeAlreadyAdded}:${String(search || "").trim().toLowerCase()}:${pagination.page}:${pagination.limit}`;
+    const responseData = await getOrSetCachedData(cacheKey,async()=>{
+        const [items,total] = await Promise.all([
+            prisma.items.findMany({
+                where,
+                orderBy:{
+                    sortOrderId:"asc"
+                },
+                skip:pagination.skip,
+                take:pagination.take,
+                select:{
+                    ...masterItemListSelect,
+                    category:{
+                        select:{
+                            id:true,
+                            name:true,
+                            slug:true,
+                            cuisineId:true,
+                            cuisine:{
+                                select:{
+                                    id:true,
+                                    name:true,
+                                    slug:true
+                                }
+                            }
+                        }
+                    },
+                    shopItems:{
+                        where:{shopId},
+                        select:{id:true}
+                    }
+                }
+            }),
+            prisma.items.count({where})
+        ]);
+
+        return {
+            shop:{
+                id:shop.id,
+                shopName:shop.shopName,
+                shopType:shop.shopType ? {
+                    id:shop.shopType.id,
+                    name:shop.shopType.name,
+                    slug:shop.shopType.slug
+                } : null
+            },
+            features:formatShopFeatureMap(shop),
+            pagination:buildPaginationMeta({
+                page:pagination.page,
+                limit:pagination.limit,
+                total
+            }),
+            items:items.map(formatMasterItemListItem),
+            scope:{
+                source:"SHOP_TYPE",
+                matched:true,
+                includeAlreadyAdded,
+                mappedItemIds
+            }
+        };
+    },MASTER_ITEMS_CACHE_TTL);
+
+    return res.status(200).json(new apiResponse(200,responseData,"shop master items fetched successfully"));
+});
+
 const fetchItemsByShop = asyncHandler(async(req,res)=>{
     const shopId = req.params.shopId || req.query.shopId;
     const {categoryId,categoryName,cuisineId,cuisineName} = req.query;
@@ -829,10 +1192,10 @@ const fetchItemsByShop = asyncHandler(async(req,res)=>{
                 shopType:shop.shopType ? {
                     id:shop.shopType.id,
                     name:shop.shopType.name,
-                    slug:shop.shopType.slug,
-                    features:shop.shopType.features.map((feature)=>feature.feature)
+                    slug:shop.shopType.slug
                 } : null
             },
+            features:formatShopFeatureMap(shop),
             selected:{
                 cuisine:formatSelectedFilter(cuisine),
                 category:formatSelectedFilter(category)
@@ -998,19 +1361,19 @@ const editShopItem = asyncHandler(async(req,res)=>{
     const {
         pricing,
         pricingMode,
-        unit,
-        displayUnit,
-        pricePerUnit,
-        minOrderQuantity,
-        quantityStep,
-        availableQuantityValue,
         availableQuantity,
         description,
+        prescriptionRequired,
+        requiresPrescription,
+        prescriptionNote,
+        prescriptionInstructions,
         imageUrl,
         photoUrl,
         sortOrderId,
         sortOrder,
         active,
+        brandId,
+        brandName,
         variantGroups
     } = req.body;
 
@@ -1037,7 +1400,21 @@ const editShopItem = asyncHandler(async(req,res)=>{
             shop:{
                 select:{
                     id:true,
-                    ownerId:true
+                    ownerId:true,
+                    shopType:{
+                        select:{
+                            features:{
+                                where:{enabled:true},
+                                select:{feature:true}
+                            }
+                        }
+                    },
+                    featureOverrides:{
+                        select:{
+                            feature:true,
+                            enabled:true
+                        }
+                    }
                 }
             }
         }
@@ -1050,26 +1427,22 @@ const editShopItem = asyncHandler(async(req,res)=>{
 
     const pricingInput = {
         pricingMode,
-        unit,
-        displayUnit,
-        pricePerUnit,
-        minOrderQuantity,
-        quantityStep,
-        availableQuantityValue,
         pricing,
         availableQuantity
     };
     const pricingDataToUpdate = normalizeShopItemPricingInput(pricingInput,{creating:false});
-    const switchingToMeasured = pricingDataToUpdate.pricingMode === "MEASURED";
 
-    if(pricing !== undefined && pricing !== null && pricing !== "" && !switchingToMeasured){
+    if(pricing !== undefined && pricing !== null && pricing !== ""){
         const updatedPrice = Number(pricing);
         if(!Number.isFinite(updatedPrice) || updatedPrice < 0){
             throw new apiError(400,"pricing must be a valid non-negative number");
         }
     }
     const parsedVariantGroups = parseShopItemVariantGroups(variantGroups);
-    const variantGroupsToReplace = switchingToMeasured && parsedVariantGroups === undefined ? [] : parsedVariantGroups;
+    const variantGroupsToReplace = parsedVariantGroups;
+    if(parsedVariantGroups && parsedVariantGroups.length > 0 && !shopHasFeature(existingShopItem.shop,"VARIANTS")){
+        throw new apiError(403,"variants are not enabled for this shop type");
+    }
 
     const itemImg = req.files?.itemImg?.[0]?.path;
     let uploadedImageUrl = null;
@@ -1081,28 +1454,24 @@ const editShopItem = asyncHandler(async(req,res)=>{
     const dataToUpdate = {};
 
     Object.assign(dataToUpdate,pricingDataToUpdate);
-    if(pricing !== undefined && !switchingToMeasured) dataToUpdate.pricing = String(pricing);
-    if(availableQuantity !== undefined && dataToUpdate.pricingMode !== "MEASURED"){
+    if(pricing !== undefined) dataToUpdate.pricing = String(pricing);
+    if(availableQuantity !== undefined){
         dataToUpdate.availableQuantity = availableQuantity === null ? null : Number(availableQuantity);
     }
     if(description !== undefined) dataToUpdate.description = description;
+    if(prescriptionRequired !== undefined || requiresPrescription !== undefined){
+        dataToUpdate.prescriptionRequired = parseBooleanField(prescriptionRequired ?? requiresPrescription,"prescriptionRequired") ?? false;
+    }
+    if(prescriptionNote !== undefined || prescriptionInstructions !== undefined){
+        const note = prescriptionNote ?? prescriptionInstructions;
+        dataToUpdate.prescriptionNote = note === null || note === "" ? null : String(note).trim();
+    }
     if(uploadedImageUrl || imageUrl !== undefined || photoUrl !== undefined) dataToUpdate.imageUrl = uploadedImageUrl || imageUrl || photoUrl;
     if(sortOrderId !== undefined || sortOrder !== undefined) dataToUpdate.sortOrderId = sortOrderId === null || sortOrder === null ? null : Number(sortOrderId ?? sortOrder);
     if(active !== undefined) dataToUpdate.active = parseBooleanField(active,"active");
-
-    if(dataToUpdate.pricingMode === "MEASURED" && parsedVariantGroups && parsedVariantGroups.length > 0){
-        throw new apiError(400,"measured items cannot have variantGroups");
-    }
-
-    if(dataToUpdate.pricingMode === "MEASURED"){
-        const comboCount = await prisma.comboItem.count({
-            where:{
-                itemId:shopItemId
-            }
-        });
-        if(comboCount > 0){
-            throw new apiError(400,"measured items cannot be used in combos");
-        }
+    if(brandId !== undefined || brandName !== undefined){
+        const brand = await resolveBrand({brandId,brandName,required:true});
+        dataToUpdate.brandId = brand.id;
     }
 
     if(Object.keys(dataToUpdate).length === 0 && variantGroupsToReplace === undefined){
@@ -1146,10 +1515,6 @@ const editShopItem = asyncHandler(async(req,res)=>{
                             select:{
                                 id:true,
                                 pricing:true,
-                                pricingMode:true,
-                                pricePerUnit:true,
-                                minOrderQuantity:true,
-                                quantityStep:true,
                                 variantGroups:{
                                     where:{active:true},
                                     orderBy:{sortOrder:"asc"},
@@ -1278,7 +1643,6 @@ const editItem = asyncHandler(async(req,res)=>{
         const category = await resolveCategory({categoryId,categoryName,cuisineName,cuisineId,required:true});
         dataToUpdate.categoryId = category.id;
     }
-
     if(Object.keys(dataToUpdate).length === 0) throw new apiError(400,"no item data passed");
 
     const updatedItem = await prisma.items.update({
@@ -1328,17 +1692,20 @@ const addPersonalProduct = asyncHandler(async(req,res)=>{
         cuisineId,
         categoryName,
         categoryId,
+        brandId,
+        brandName,
+        tagIds,
+        tags,
+        addTag,
         itemName,
         name,
         pricing,
         pricingMode,
-        unit,
-        displayUnit,
-        pricePerUnit,
-        minOrderQuantity,
-        quantityStep,
-        availableQuantityValue,
         availableQuantity,
+        prescriptionRequired,
+        requiresPrescription,
+        prescriptionNote,
+        prescriptionInstructions,
         description,
         imageUrl,
         photoUrl,
@@ -1353,14 +1720,9 @@ const addPersonalProduct = asyncHandler(async(req,res)=>{
     if(!sellerId) throw new apiError(401,"Unauthorized user");
     if(!shopId) throw new apiError(400,"shop id is required");
     if(!masterItemId && !customItemName) throw new apiError(400,"item id or item name is required");
+    const normalizedTagIds = await normalizeActiveTagIds(parseTagIdsField(tagIds ?? tags ?? addTag,"tagIds"));
     const pricingData = normalizeShopItemPricingInput({
         pricingMode,
-        unit,
-        displayUnit,
-        pricePerUnit,
-        minOrderQuantity,
-        quantityStep,
-        availableQuantityValue,
         pricing,
         availableQuantity
     },{creating:true});
@@ -1383,10 +1745,6 @@ const addPersonalProduct = asyncHandler(async(req,res)=>{
         pricingData.availableQuantity = shopItemAvailableQuantity;
     }
     const parsedVariantGroups = parseShopItemVariantGroups(variantGroups);
-
-    if(pricingData.pricingMode === "MEASURED" && parsedVariantGroups && parsedVariantGroups.length > 0){
-        throw new apiError(400,"measured items cannot have variantGroups");
-    }
 
     const shop = await prisma.shop.findUnique({
         where:{
@@ -1423,6 +1781,9 @@ const addPersonalProduct = asyncHandler(async(req,res)=>{
     if(!shopHasFeature(shop,"CUISINE") && (cuisineId || cuisineName)){
         throw new apiError(403,"cuisine is not enabled for this shop type");
     }
+    if(parsedVariantGroups && parsedVariantGroups.length > 0 && !shopHasFeature(shop,"VARIANTS")){
+        throw new apiError(403,"variants are not enabled for this shop type");
+    }
     if(shop.ownerId !== sellerId) throw new apiError(403,"You can only create products for your own shop");
 
     const itemImg = req.files?.itemImg?.[0]?.path;
@@ -1434,6 +1795,7 @@ const addPersonalProduct = asyncHandler(async(req,res)=>{
     }
     const requestedImageUrl = uploadedImageUrl || imageUrl || photoUrl;
     const category = await resolveCategory({categoryId,categoryName,cuisineName,cuisineId,required:!masterItemId && shopHasFeature(shop,"CATEGORIES")});
+    const brand = await resolveBrand({brandId,brandName});
 
     let masterItem = null;
     if(masterItemId){
@@ -1557,8 +1919,13 @@ const addPersonalProduct = asyncHandler(async(req,res)=>{
             data:{
                 shopId,
                 itemId:masterItem.id,
+                brandId:brand?.id,
                 ...pricingData,
                 description,
+                prescriptionRequired:parseBooleanField(prescriptionRequired ?? requiresPrescription ?? false,"prescriptionRequired") ?? false,
+                prescriptionNote:prescriptionNote === undefined && prescriptionInstructions === undefined
+                    ? null
+                    : String((prescriptionNote ?? prescriptionInstructions) || "").trim() || null,
                 imageUrl:requestedImageUrl,
                 sortOrderId:Number(sortOrderId ?? sortOrder ?? 0),
                 active:parseBooleanField(active,"active") ?? true
@@ -1578,4 +1945,4 @@ const addPersonalProduct = asyncHandler(async(req,res)=>{
     return res.status(201).json(new apiResponse(201,shopItem,"item added to shop successfully"));
 });
 
-export { createItems, mapItems, fetchItemsToCategory, fetchAllItems, fetchOnlyItems, fetchItemsByShop, reorderItems, reorderShopItems, editShopItem, deleteShopItem, editItem, deleteItem, addPersonalProduct };
+export { createItems, mapItems, fetchItemsToCategory, fetchAllItems, fetchOnlyItems, fetchMasterItemsForShop, fetchItemsByShop, reorderItems, reorderShopItems, editShopItem, deleteShopItem, editItem, deleteItem, addPersonalProduct };

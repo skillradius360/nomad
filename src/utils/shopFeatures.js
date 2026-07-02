@@ -1,6 +1,6 @@
 import { apiError } from "./handler.js";
 
-const allowedShopFeatures = ["ITEMS","CATEGORIES","CUISINE","MENUS","COMBOS"];
+const allowedShopFeatures = ["ITEMS","CATEGORIES","CUISINE","MENUS","COMBOS","VARIANTS"];
 
 const normalizeShopFeature = (feature)=>{
     const normalizedFeature = String(feature || "").trim().toUpperCase();
@@ -63,6 +63,14 @@ const getEffectiveShopFeatures = (shop)=>{
     return [...baseFeatures];
 };
 
+const formatShopFeatureMap = (shop)=>getEffectiveShopFeatures(shop).reduce((features,feature)=>{
+        features[feature.toLowerCase()] = true;
+        return features;
+    },allowedShopFeatures.reduce((features,feature)=>{
+        features[feature.toLowerCase()] = false;
+        return features;
+    },{}));
+
 const shopHasFeature = (shop,feature)=>{
     if(!shop?.shopType && !shop?.featureOverrides?.length) return true;
     return getEffectiveShopFeatures(shop).includes(normalizeShopFeature(feature));
@@ -80,11 +88,13 @@ const formatShopFeatureSummary = (shop)=>({
     },
     baseFeatures:getBaseShopFeatures(shop),
     overrides:getShopFeatureOverrides(shop),
-    effectiveFeatures:getEffectiveShopFeatures(shop)
+    effectiveFeatures:getEffectiveShopFeatures(shop),
+    features:formatShopFeatureMap(shop)
 });
 
 export {
     allowedShopFeatures,
+    formatShopFeatureMap,
     formatShopFeatureSummary,
     getEffectiveShopFeatures,
     normalizeShopFeature,

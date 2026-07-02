@@ -1,5 +1,6 @@
 import { prisma } from "../../db/index.js";
 import { apiError, apiResponse, asyncHandler } from "../../utils/handler.js";
+import { deleteCacheByPattern } from "../../utils/cache.js";
 
 const parseCoordinate = (value, fieldName) => {
     const coordinate = Number(value);
@@ -206,6 +207,10 @@ const editBuyerProfile = asyncHandler(async (req, res) => {
         data: updateData,
         select: buyerProfileSelect,
     });
+
+    if (updateData.latitude !== undefined || updateData.longitude !== undefined) {
+        await deleteCacheByPattern(`buyer:shops:nearby:*:${userId}:*`);
+    }
 
     return res
         .status(200)

@@ -660,7 +660,7 @@ const fetchOfferUsage = asyncHandler(async(req,res)=>{
     const pagination = getPagination(req.query,{defaultLimit:20,maxLimit:100});
     const orderWhere = {
         shopId:offer.shopId,
-        currentOrderStatus:"DONE",
+        currentOrderStatus:"COMPLETED",
         completedAt:{
             gte:offer.startsAt,
             lte:offer.endsAt
@@ -735,7 +735,7 @@ const fetchOfferAnalytics = asyncHandler(async(req,res)=>{
         prisma.order.aggregate({
             where:{
                 shopId:offer.shopId,
-                currentOrderStatus:"DONE",
+                currentOrderStatus:"COMPLETED",
                 completedAt:{
                     gte:offer.startsAt,
                     lte:offer.endsAt
@@ -758,7 +758,7 @@ const fetchOfferAnalytics = asyncHandler(async(req,res)=>{
                 COALESCE(SUM(o."paidAmount"),0)::int AS "paidRevenue"
             FROM "Order" o
             WHERE o."shopId" = ${offer.shopId}
-                AND o."currentOrderStatus" = 'DONE'
+                AND o."currentOrderStatus" = 'COMPLETED'
                 AND o."completedAt" >= ${offer.startsAt}
                 AND o."completedAt" <= ${offer.endsAt}
                 AND (o."discountAmount" > 0 OR o."deliveryDiscountAmount" > 0)

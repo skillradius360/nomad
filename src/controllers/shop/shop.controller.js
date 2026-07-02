@@ -3,7 +3,7 @@ import { apiError, apiResponse, asyncHandler } from "../../utils/handler.js";
 import { cloudUploader } from "../../utils/cloudinary.upload.js";
 import { deleteCacheByPattern, getCachedData, setCachedData } from "../../utils/cache.js";
 import { buildPaginationMeta, getPagination } from "../../utils/pagination.js";
-import { getEffectiveShopFeatures, normalizeShopFeature, normalizeShopFeatures } from "../../utils/shopFeatures.js";
+import { formatShopFeatureMap, getEffectiveShopFeatures, normalizeShopFeature, normalizeShopFeatures } from "../../utils/shopFeatures.js";
 import {
     calculateShopItemLowestPrice,
     formatShopItemVariantGroups,
@@ -108,6 +108,7 @@ const invalidateShopCaches = async(shop)=>{
         deleteCacheByPattern(`buyer:shop:full:${shop.id}`),
         deleteCacheByPattern(`buyer:shop:full:*:${shop.id}`),
         deleteCacheByPattern(`buyer:shop:${shop.id}:*`),
+        deleteCacheByPattern("buyer:shops:nearby:*"),
         shop.slug ? deleteCacheByPattern(`buyer:shop:slug:${shop.slug}`) : Promise.resolve(),
         shop.slug ? deleteCacheByPattern(`buyer:shop:slug:*:${shop.slug}`) : Promise.resolve()
     ]);
@@ -155,7 +156,16 @@ const formatShopBrowseItem = (shopItem)=>({
     variantGroups:formatShopItemVariantGroups(shopItem.variantGroups),
     availableQuantity:shopItem.availableQuantity,
     imageUrl:shopItem.imageUrl || shopItem.item?.imageUrl || null,
+    brandId:shopItem.brandId || null,
+    brand:shopItem.brand ? {
+        id:shopItem.brand.id,
+        name:shopItem.brand.name,
+        slug:shopItem.brand.slug,
+        imageUrl:shopItem.brand.imageUrl
+    } : null,
     description:shopItem.description,
+    prescriptionRequired:shopItem.prescriptionRequired || false,
+    prescriptionNote:shopItem.prescriptionNote || null,
     sortOrderId:shopItem.sortOrderId,
     active:shopItem.active,
     categoryId:shopItem.item?.categoryId || null,
@@ -190,6 +200,8 @@ const formatShopBrowseCombo = (combo)=>({
         variantGroups:formatShopItemVariantGroups(comboItem.item?.variantGroups),
         imageUrl:comboItem.item?.imageUrl || comboItem.item?.item?.imageUrl || null,
         description:comboItem.item?.description,
+        prescriptionRequired:comboItem.item?.prescriptionRequired || false,
+        prescriptionNote:comboItem.item?.prescriptionNote || null,
         categoryId:comboItem.item?.item?.categoryId || null
     })) || []
 });
@@ -205,6 +217,40 @@ const formatShopBrowseData = (shopData)=>({
     } : null,
     items:shopData.items?.map(formatShopBrowseItem) || [],
     combos:shopData.combos?.map(formatShopBrowseCombo) || []
+});
+
+const addCategoryToMap = (categories,category)=>{
+    if(!category?.id || categories.has(category.id)) return;
+    categories.set(category.id,{
+        id:category.id,
+        name:category.name,
+        slug:category.slug || null,
+        cuisineId:category.cuisineId || null,
+        cuisineName:category.cuisine?.name || null,
+        cuisineSlug:category.cuisine?.slug || null
+    });
+};
+
+const formatBuyerCatalogMenu = (menu)=>({
+    id:menu.id,
+    name:menu.name,
+    description:menu.description,
+    sortOrderId:menu.sortOrderId,
+    schedules:menu.schedules?.map((schedule)=>({
+        dayOfWeek:schedule.dayOfWeek,
+        startMinute:schedule.startMinute,
+        endMinute:schedule.endMinute
+    })) || [],
+    items:menu.items?.map((menuItem)=>({
+        shopItemId:menuItem.itemId,
+        menuItemId:menuItem.id,
+        menuSortOrderId:menuItem.sortOrderId
+    })) || [],
+    combos:menu.combos?.map((menuCombo)=>({
+        comboId:menuCombo.comboId,
+        menuComboId:menuCombo.id,
+        menuSortOrderId:menuCombo.sortOrderId
+    })) || []
 });
 
 const formatFullShopData = (shop)=>{
@@ -343,7 +389,7 @@ function generateRandom(length = 4) {
 const createShop = asyncHandler(async(req,res)=>{
 
     const {shopName,description,
-        latitude, longitude,shopTypeId,shopTypeSlug}= req.body
+        address, latitude, longitude,shopTypeId,shopTypeSlug}= req.body
         const ownerId = req.userData?.id;
 
         if (!ownerId) {
@@ -358,6 +404,20 @@ const createShop = asyncHandler(async(req,res)=>{
         if(!shopImg){
             throw new apiError(400,"shop image not provided")
         }
+
+        const ownerLocation = await prisma.user.findUnique({
+            where:{
+                id:ownerId
+            },
+            select:{
+                address:true,
+                latitude:true,
+                longitude:true
+            }
+        });
+
+        const shopLatitude = latitude !== undefined ? parseOptionalCoordinate(latitude, "latitude") : ownerLocation?.latitude ?? null;
+        const shopLongitude = longitude !== undefined ? parseOptionalCoordinate(longitude, "longitude") : ownerLocation?.longitude ?? null;
 
         const shopImage =await cloudUploader(shopImg)
         if(!shopImage.url) throw new apiError(400,"shop image uploading failed")
@@ -388,6 +448,7 @@ const createShop = asyncHandler(async(req,res)=>{
         shopName,
         ownerId,
         shopImage:shopImage.url,
+        Address:address !== undefined ? String(address).trim() : ownerLocation?.address ?? null,
         Description:description,
         slug:createSlug,
         OpeningTime:null,
@@ -396,20 +457,23 @@ const createShop = asyncHandler(async(req,res)=>{
         status:"CLOSED",
         Holidays:validShopDays.map((day)=>day.toLowerCase()),
         Verified:req.currentUser?.role === "ADMIN",
-        latitude: parseOptionalCoordinate(latitude, "latitude"),
-        longitude: parseOptionalCoordinate(longitude, "longitude"),
+        latitude:shopLatitude,
+        longitude:shopLongitude,
         shopTypeId:selectedShopType?.id
     },
     select:{
         id:true,
         shopName:true,
         shopImage:true,
+        Address:true,
         Description:true,
         slug:true,
         ShopOpenStatus:true,
         status:true,
         Verified:true,
         deliveryEnabled:true,
+        latitude:true,
+        longitude:true,
         shopType:{
             select:{
                 id:true,
@@ -431,11 +495,18 @@ const createShop = asyncHandler(async(req,res)=>{
 
     if(!shopData) throw new apiError(400," shop data creation process failed failed! ")
 
+    await invalidateShopCaches(shopData);
+
     return res.json(new apiResponse(200,{
         id:shopData.id,
         shopName:shopData.shopName,
         shopImage:shopData.shopImage,
         slug:shopData.slug,
+        location:{
+            address:shopData.Address,
+            latitude:shopData.latitude,
+            longitude:shopData.longitude
+        },
         verified:shopData.Verified,
         status:shopData.status,
         deliveryEnabled:shopData.deliveryEnabled,
@@ -580,13 +651,6 @@ const findFullShopData = asyncHandler(async(req,res)=>{
                     'itemId',i.id,
                     'name',i.name,
                     'pricing',si.pricing,
-                    'pricingMode',si."pricingMode",
-                    'unit',si.unit,
-                    'displayUnit',si."displayUnit",
-                    'pricePerUnit',si."pricePerUnit",
-                    'minOrderQuantity',si."minOrderQuantity",
-                    'quantityStep',si."quantityStep",
-                    'availableQuantityValue',si."availableQuantityValue",
                     'availableQuantity',si."availableQuantity",
                     'imageUrl',COALESCE(si."imageUrl",i."imageUrl"),
                     'description',si.description,
@@ -643,13 +707,6 @@ const findFullShopData = asyncHandler(async(req,res)=>{
                             'name',master_item.name,
                             'quantity',combo_item.quantity,
                             'pricing',combo_shop_item.pricing,
-                            'pricingMode',combo_shop_item."pricingMode",
-                            'unit',combo_shop_item.unit,
-                            'displayUnit',combo_shop_item."displayUnit",
-                            'pricePerUnit',combo_shop_item."pricePerUnit",
-                            'minOrderQuantity',combo_shop_item."minOrderQuantity",
-                            'quantityStep',combo_shop_item."quantityStep",
-                            'availableQuantityValue',combo_shop_item."availableQuantityValue",
                             'variantGroups',COALESCE((
                                 SELECT jsonb_agg(jsonb_build_object(
                                     'id',variant_group.id,
@@ -742,7 +799,7 @@ const fetchShopCustomers = asyncHandler(async(req,res)=>{
                 users.latitude,
                 users.longitude,
                 COUNT(orders.id)::int AS "totalOrders",
-                COUNT(orders.id) FILTER (WHERE orders."currentOrderStatus" = 'DONE')::int AS "completedOrders",
+                COUNT(orders.id) FILTER (WHERE orders."currentOrderStatus" = 'COMPLETED')::int AS "completedOrders",
                 COUNT(orders.id) FILTER (WHERE orders."currentOrderStatus" = 'CANCELLED')::int AS "cancelledOrders",
                 COALESCE(SUM(orders."totalAmount"),0)::int AS "totalSpent",
                 MAX(orders."createdAt") AS "lastOrderAt"
@@ -1581,7 +1638,8 @@ const findNearbyShops = asyncHandler(async(req,res)=>{
     if(!Number.isFinite(radiusKm) || radiusKm <= 0){
         throw new apiError(400,"radius must be a valid positive number");
     }
-    const pagination = getPagination(req.query,{defaultLimit:20,maxLimit:50});
+    const shouldPaginateNearby = req.query.page !== undefined || req.query.limit !== undefined || req.query.take !== undefined;
+    const pagination = shouldPaginateNearby ? getPagination(req.query,{defaultLimit:20,maxLimit:50}) : null;
 
     const buyer = await prisma.user.findUnique({
         where:{
@@ -1609,7 +1667,10 @@ const findNearbyShops = asyncHandler(async(req,res)=>{
     const longitudeScale = Math.abs(Math.cos((buyer.latitude * Math.PI) / 180));
     const longitudeDelta = longitudeScale < 0.000001 ? 180 : radiusKm / (111.32 * longitudeScale);
     const debugNearby = isTruthyQuery(req.query.debug);
-    const cacheKey = `buyer:shops:nearby:v3:${buyerId}:${radiusKm}:${requestedStatus}:${pagination.page}:${pagination.limit}:${debugNearby}`;
+    const buyerLatitudeKey = Number(buyer.latitude).toFixed(6);
+    const buyerLongitudeKey = Number(buyer.longitude).toFixed(6);
+    const cacheScope = pagination ? `${pagination.page}:${pagination.limit}` : "all";
+    const cacheKey = `buyer:shops:nearby:v5:${buyerId}:${buyerLatitudeKey}:${buyerLongitudeKey}:${radiusKm}:${requestedStatus}:${cacheScope}:${debugNearby}`;
 
     if(!debugNearby){
         const cachedNearbyShops = await getCachedData(cacheKey);
@@ -1728,14 +1789,25 @@ const findNearbyShops = asyncHandler(async(req,res)=>{
     const nearbyShops = shopsWithinRadius
         .filter((shop)=>requestedStatus === "ALL" || shop.openStatus === requestedStatus);
 
+    const responseShops = pagination
+        ? nearbyShops.slice(pagination.skip,pagination.skip + pagination.limit)
+        : nearbyShops;
+
     const responseData = {
-        pagination:buildPaginationMeta({
-            page:pagination.page,
-            limit:pagination.limit,
-            total:nearbyShops.length
-        }),
+        pagination:pagination
+            ? buildPaginationMeta({
+                page:pagination.page,
+                limit:pagination.limit,
+                total:nearbyShops.length
+            })
+            : {
+                page:1,
+                limit:nearbyShops.length,
+                total:nearbyShops.length,
+                totalPages:nearbyShops.length > 0 ? 1 : 0
+            },
         radiusKm,
-        shops:nearbyShops.slice(pagination.skip,pagination.skip + pagination.limit).map((shop)=>({
+        shops:responseShops.map((shop)=>({
             id:shop.id,
             shopName:shop.shopName,
             shopImage:shop.shopImage,
@@ -1863,13 +1935,6 @@ const findByShopSlug = asyncHandler(async(req,res)=>{
                 select:{
                     id:true,
                     pricing:true,
-                    pricingMode:true,
-                    unit:true,
-                    displayUnit:true,
-                    pricePerUnit:true,
-                    minOrderQuantity:true,
-                    quantityStep:true,
-                    availableQuantityValue:true,
                     availableQuantity:true,
                     imageUrl:true,
                     description:true,
@@ -1937,13 +2002,6 @@ const findByShopSlug = asyncHandler(async(req,res)=>{
                                 select:{
                                     id:true,
                                     pricing:true,
-                                    pricingMode:true,
-                                    unit:true,
-                                    displayUnit:true,
-                                    pricePerUnit:true,
-                                    minOrderQuantity:true,
-                                    quantityStep:true,
-                                    availableQuantityValue:true,
                                     imageUrl:true,
                                     description:true,
                                     variantGroups:{
@@ -1974,6 +2032,358 @@ const findByShopSlug = asyncHandler(async(req,res)=>{
 
     return res.status(200).json(new apiResponse(200,responseData,"slug based shop found"))
 })
+
+const fetchBuyerShopItems = asyncHandler(async(req,res)=>{
+    const { shopId } = req.params;
+
+    if(!shopId) throw new apiError(400,"shopId is required");
+
+    const cacheKey = `buyer:shop:${shopId}:fetchshopitems:v1`;
+    const cachedCatalog = await getCachedData(cacheKey);
+    if(cachedCatalog){
+        return res.status(200).json(new apiResponse(200,cachedCatalog,"buyer shop items fetched successfully"));
+    }
+
+    const now = new Date();
+    const shopData = await prisma.shop.findUnique({
+        where:{
+            id:shopId
+        },
+        select:{
+            id:true,
+            shopName:true,
+            shopImage:true,
+            Address:true,
+            Tags:true,
+            Description:true,
+            slug:true,
+            OpeningTime:true,
+            ClosingTime:true,
+            ShopOpenStatus:true,
+            status:true,
+            Holidays:true,
+            Verified:true,
+            billingStatus:true,
+            MinimumDeliveryRate:true,
+            FreeDeliveryRate:true,
+            deliveryEnabled:true,
+            latitude:true,
+            longitude:true,
+            shopType:{
+                select:{
+                    id:true,
+                    name:true,
+                    slug:true,
+                    features:{
+                        where:{enabled:true},
+                        select:{feature:true}
+                    }
+                }
+            },
+            featureOverrides:{
+                select:{
+                    feature:true,
+                    enabled:true
+                }
+            },
+            timings:{
+                where:{active:true},
+                orderBy:{
+                    dayOfWeek:"asc"
+                },
+                select:{
+                    id:true,
+                    dayOfWeek:true,
+                    startMinute:true,
+                    endMinute:true,
+                    active:true
+                }
+            },
+            items:{
+                where:{active:true},
+                orderBy:{sortOrderId:"asc"},
+                select:{
+                    id:true,
+                    pricing:true,
+                    availableQuantity:true,
+                    imageUrl:true,
+                    description:true,
+                    prescriptionRequired:true,
+                    prescriptionNote:true,
+                    sortOrderId:true,
+                    active:true,
+                    brandId:true,
+                    brand:{
+                        select:{
+                            id:true,
+                            name:true,
+                            slug:true,
+                            imageUrl:true
+                        }
+                    },
+                    variantGroups:{
+                        orderBy:{sortOrder:"asc"},
+                        select:shopItemVariantSelect
+                    },
+                    item:{
+                        select:{
+                            id:true,
+                            name:true,
+                            imageUrl:true,
+                            categoryId:true,
+                            category:{
+                                select:{
+                                    id:true,
+                                    name:true,
+                                    slug:true,
+                                    cuisineId:true,
+                                    cuisine:{
+                                        select:{
+                                            id:true,
+                                            name:true,
+                                            slug:true
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            combos:{
+                where:{active:true},
+                orderBy:{sortOrderId:"asc"},
+                select:{
+                    id:true,
+                    name:true,
+                    description:true,
+                    imageUrl:true,
+                    totalPrice:true,
+                    availableQuantity:true,
+                    sortOrderId:true,
+                    active:true,
+                    cuisine:{
+                        select:{
+                            id:true,
+                            name:true,
+                            slug:true
+                        }
+                    },
+                    category:{
+                        select:{
+                            id:true,
+                            name:true,
+                            slug:true,
+                            cuisineId:true,
+                            cuisine:{
+                                select:{
+                                    id:true,
+                                    name:true,
+                                    slug:true
+                                }
+                            }
+                        }
+                    },
+                    items:{
+                        select:{
+                            id:true,
+                            quantity:true,
+                            item:{
+                                select:{
+                                    id:true,
+                                    pricing:true,
+                                    availableQuantity:true,
+                                    imageUrl:true,
+                                    description:true,
+                                    prescriptionRequired:true,
+                                    prescriptionNote:true,
+                                    brandId:true,
+                                    brand:{
+                                        select:{
+                                            id:true,
+                                            name:true,
+                                            slug:true,
+                                            imageUrl:true
+                                        }
+                                    },
+                                    variantGroups:{
+                                        orderBy:{sortOrder:"asc"},
+                                        select:shopItemVariantSelect
+                                    },
+                                    item:{
+                                        select:{
+                                            id:true,
+                                            name:true,
+                                            imageUrl:true,
+                                            categoryId:true,
+                                            category:{
+                                                select:{
+                                                    id:true,
+                                                    name:true,
+                                                    slug:true,
+                                                    cuisineId:true
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            menus:{
+                where:{active:true},
+                orderBy:[
+                    {sortOrderId:"asc"},
+                    {createdAt:"asc"}
+                ],
+                select:{
+                    id:true,
+                    name:true,
+                    description:true,
+                    sortOrderId:true,
+                    schedules:{
+                        where:{active:true},
+                        orderBy:[
+                            {dayOfWeek:"asc"},
+                            {startMinute:"asc"}
+                        ],
+                        select:{
+                            dayOfWeek:true,
+                            startMinute:true,
+                            endMinute:true
+                        }
+                    },
+                    items:{
+                        where:{active:true},
+                        orderBy:{sortOrderId:"asc"},
+                        select:{
+                            id:true,
+                            sortOrderId:true,
+                            itemId:true
+                        }
+                    },
+                    combos:{
+                        where:{active:true},
+                        orderBy:{sortOrderId:"asc"},
+                        select:{
+                            id:true,
+                            sortOrderId:true,
+                            comboId:true
+                        }
+                    }
+                }
+            },
+            banners:{
+                where:{active:true},
+                orderBy:{createdAt:"desc"},
+                select:{
+                    id:true,
+                    text:true,
+                    imageUrl:true,
+                    active:true,
+                    createdAt:true
+                }
+            },
+            offers:{
+                where:{
+                    active:true,
+                    startsAt:{lte:now},
+                    endsAt:{gte:now}
+                },
+                orderBy:{startsAt:"desc"},
+                select:{
+                    id:true,
+                    title:true,
+                    description:true,
+                    offerType:true,
+                    applyTo:true,
+                    minQuantity:true,
+                    minOrderAmount:true,
+                    discountType:true,
+                    discountValue:true,
+                    maxDiscountAmount:true,
+                    rewardQuantity:true,
+                    imageUrl:true,
+                    startsAt:true,
+                    endsAt:true
+                }
+            }
+        }
+    });
+
+    if(!shopData) throw new apiError(404,"shop not found");
+
+    const openState = calculateShopOpenState(shopData);
+    const items = shopData.items?.map(formatShopBrowseItem) || [];
+    const combos = shopData.combos?.map(formatShopBrowseCombo) || [];
+    const menus = shopData.menus?.map(formatBuyerCatalogMenu) || [];
+    const categories = new Map();
+
+    shopData.items?.forEach((shopItem)=>addCategoryToMap(categories,shopItem.item?.category));
+    shopData.combos?.forEach((combo)=>addCategoryToMap(categories,combo.category));
+
+    const categoryList = [...categories.values()];
+    const hasVariants = items.some((item)=>item.hasVariants) ||
+        combos.some((combo)=>combo.items?.some((item)=>item.hasVariants));
+
+    const configuredFeatures = formatShopFeatureMap(shopData);
+    const features = {
+        ...configuredFeatures,
+        items:items.length > 0,
+        combos:combos.length > 0,
+        menus:menus.length > 0,
+        categories:categoryList.length > 0,
+        cuisine:categoryList.some((category)=>category.cuisineId) || combos.some((combo)=>combo.cuisineId),
+        variants:hasVariants,
+        variance:hasVariants
+    };
+
+    const responseData = {
+        shop:{
+            id:shopData.id,
+            shopName:shopData.shopName,
+            shopImage:shopData.shopImage,
+            address:shopData.Address,
+            tags:shopData.Tags,
+            description:shopData.Description,
+            slug:shopData.slug,
+            verified:shopData.Verified,
+            billingStatus:shopData.billingStatus,
+            shopType:shopData.shopType ? {
+                id:shopData.shopType.id,
+                name:shopData.shopType.name,
+                slug:shopData.shopType.slug
+            } : null,
+            delivery:{
+                enabled:shopData.deliveryEnabled,
+                minimumRate:shopData.MinimumDeliveryRate,
+                freeRate:shopData.FreeDeliveryRate
+            },
+            location:{
+                latitude:shopData.latitude,
+                longitude:shopData.longitude
+            },
+            configuredStatus:openState.configuredStatus,
+            openStatus:openState.openStatus,
+            isOpenNow:openState.isOpenNow,
+            todayTiming:openState.todayTiming,
+            orderingAvailable:shopData.Verified && shopData.billingStatus !== "HOLD" && openState.isOpenNow
+        },
+        features,
+        categories:categoryList,
+        items,
+        combos,
+        menus,
+        banners:shopData.banners || [],
+        offers:shopData.offers || []
+    };
+
+    await setCachedData(cacheKey,responseData,45);
+
+    return res.status(200).json(new apiResponse(200,responseData,"buyer shop items fetched successfully"));
+});
 
 // ************************************************************************************************
 
@@ -2197,6 +2607,7 @@ export {
     editShopSettings,
     findNearbyShops,
     findByShopSlug,
+    fetchBuyerShopItems,
 
 
 
